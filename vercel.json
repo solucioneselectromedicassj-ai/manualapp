@@ -1,4 +1,7 @@
 {
+  "functions": {
+    "api/*.js": { "maxDuration": 60 }
+  },
   "headers": [
     {
       "source": "/(.*)",
