@@ -93,6 +93,18 @@ module.exports = handler(async (req, res, cfg) => {
   // Primero los links que sugirieron varias IAs.
   const manuales = [...porUrl.values()].sort((a, b) => b.ias.length - a.ias.length);
   info = info || {};
+
+  // Diagnostico: si ninguna IA encontro un solo link, casi siempre es porque
+  // ninguna tiene busqueda web real funcionando (Gemini sin facturacion
+  // habilitada = grounding sin cupo, y sin Grok/DeepSeek de respaldo).
+  let aviso = "";
+  if (manuales.length === 0) {
+    const usaronWeb = resumen.filter((r) => r.ok);
+    aviso = usaronWeb.length
+      ? "Ninguna IA encontró links reales de manuales. Con solo Gemini configurado esto pasa cuando el proyecto de Google Cloud de la clave no tiene facturación habilitada (la búsqueda en Google dentro de Gemini no tiene cupo gratis). Solución: habilitá facturación en ese proyecto (igual sigue siendo casi gratis) o agregá Grok en Configuración, que trae su propia búsqueda."
+      : "";
+  }
+
   send(res, 200, {
     nombre: info.nombre || nombre,
     marca: info.marca || "",
@@ -103,5 +115,6 @@ module.exports = handler(async (req, res, cfg) => {
     insumos,
     repuestos,
     ias: resumen,
+    aviso,
   });
 });
