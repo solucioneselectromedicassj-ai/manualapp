@@ -1,7 +1,7 @@
 // POST {nombre} -> busca en internet (Gemini + Google Search) los manuales
 // del equipo y devuelve candidatos. Los links se validan despues en
 // /api/descargar (que se queda solo con PDFs reales).
-const { handler, send, fail, gemini, parseJson } = require("./_lib");
+const { handler, send, fail, geminiConBusqueda, parseJson } = require("./_lib");
 
 const PROMPT = (nombre) => `Sos un asistente de ingenieria biomedica. Buscá en internet los manuales del equipo medico: "${nombre}".
 
@@ -26,10 +26,15 @@ module.exports = handler(async (req, res, cfg) => {
   const nombre = ((req.body && req.body.nombre) || "").toString().trim();
   if (!nombre) throw fail(400, "falta nombre");
 
-  const { text, chunks } = await gemini(cfg, {
+  const { text, chunks, resultados } = await geminiConBusqueda(cfg, {
     contents: [{ role: "user", parts: [{ text: PROMPT(nombre) }] }],
-    tools: [{ google_search: {} }],
-    generationConfig: { temperature: 0.2 },
+    consultas: [
+      `${nombre} service manual pdf`,
+      `${nombre} user manual pdf`,
+      `${nombre} operator's manual filetype:pdf`,
+      `${nombre} parts list spare parts pdf`,
+      `${nombre} manual de servicio pdf`,
+    ],
   });
   const data = parseJson(text) || {};
 
@@ -42,6 +47,17 @@ module.exports = handler(async (req, res, cfg) => {
       vistos.add(c.uri);
       manuales.push({ tipo: "", titulo: c.title || "Resultado de busqueda", url: c.uri, fuente: c.title || "" });
     }
+  });
+
+  // Resultados de busqueda directa (sin grounding): los que parecen PDF de
+  // manual se suman como candidatos, clasificados por palabras clave.
+  resultados.forEach((x) => {
+    if (vistos.has(x.url)) return;
+    const t = (x.titulo + " " + x.url).toLowerCase();
+    if (!/\.pdf|manual|service|parts|despiece/.test(t)) return;
+    vistos.add(x.url);
+    const tipo = /service|servicio|tecnico|técnico|repair/.test(t) ? "tecnico" : /parts|spare|despiece|repuesto/.test(t) ? "despiece" : /user|operat|usuario|instruc/.test(t) ? "usuario" : "";
+    manuales.push({ tipo, titulo: x.titulo, url: x.url, fuente: (x.url.match(/\/\/(?:www\.)?([^/]+)/) || [])[1] || "" });
   });
 
   send(res, 200, {

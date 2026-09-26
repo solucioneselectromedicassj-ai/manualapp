@@ -275,18 +275,18 @@ function ModalAgregarEquipo({ nombreInicial, onClose, onCreado }) {
       }
       if (cancel) return;
 
-      const base = eq.manuales.find((m) => m.driveId && m.tipo === "despiece") || eq.manuales.find((m) => m.driveId && m.tipo === "tecnico") || eq.manuales.find((m) => m.driveId);
+      const base = eq.manuales.find((m) => (m.driveId || m.url) && m.tipo === "despiece") || eq.manuales.find((m) => (m.driveId || m.url) && m.tipo === "tecnico") || eq.manuales.find((m) => m.driveId || m.url);
       if (base) {
         paso("extraer", "buscando", "leyendo " + base.titulo);
         try {
-          const x = await api("extraer", { driveId: base.driveId, titulo: base.titulo, equipo: eq.nombre });
+          const x = await api("extraer", { driveId: base.driveId, url: base.url, titulo: base.titulo, equipo: eq.nombre });
           eq.insumos = unirItems(x.insumos.map((i) => ({ ...i, origen: "auto" })), eq.insumos);
           eq.repuestos = unirItems(x.repuestos.map((r) => ({ ...r, origen: "auto" })), eq.repuestos);
           paso("extraer", "ok", `${x.insumos.length} insumos, ${x.repuestos.length} repuestos del manual`);
         } catch (e) {
           paso("extraer", "error", e.message);
         }
-      } else paso("extraer", "error", "no hay manual en Drive para leer (se usan los datos de la web)");
+      } else paso("extraer", "error", "no se encontró manual para leer (se usan los datos de la web)");
 
       if (cancel) return;
       setEquipo(eq);
@@ -356,7 +356,7 @@ function TabManuales({ equipo, onUpdate }) {
   const [tipoNuevo, setTipoNuevo] = useState("tecnico");
   const fileRef = useRef(null);
   const manuales = equipo.manuales || [];
-  const faltan = Object.keys(TIPOS).filter((t) => !manuales.some((m) => m.tipo === t && m.driveId));
+  const faltan = Object.keys(TIPOS).filter((t) => !manuales.some((m) => m.tipo === t && (m.driveId || m.url)));
 
   const agregarManual = (m) => onUpdate({ manuales: [...manuales, m] });
 
@@ -547,12 +547,12 @@ function ListaItems({ items, onChange, placeholder, alertas }) {
 
 function BotonExtraer({ equipo, onUpdate }) {
   const [estado, setEstado] = useState("");
-  const base = (equipo.manuales || []).find((m) => m.driveId && m.tipo === "despiece") || (equipo.manuales || []).find((m) => m.driveId && m.tipo === "tecnico") || (equipo.manuales || []).find((m) => m.driveId);
+  const base = (equipo.manuales || []).find((m) => (m.driveId || m.url) && m.tipo === "despiece") || (equipo.manuales || []).find((m) => (m.driveId || m.url) && m.tipo === "tecnico") || (equipo.manuales || []).find((m) => m.driveId || m.url);
   if (!base) return null;
   const run = async () => {
     setEstado("Leyendo " + base.titulo + "…");
     try {
-      const x = await api("extraer", { driveId: base.driveId, titulo: base.titulo, equipo: equipo.nombre });
+      const x = await api("extraer", { driveId: base.driveId, url: base.url, titulo: base.titulo, equipo: equipo.nombre });
       onUpdate({
         insumos: unirItems(equipo.insumos, x.insumos.map((i) => ({ ...i, origen: "auto" }))),
         repuestos: unirItems(equipo.repuestos, x.repuestos.map((r) => ({ ...r, origen: "auto" }))),
@@ -615,13 +615,13 @@ function TabFallas({ equipo, onUpdate }) {
   const [foto, setFoto] = useState(null);
   const [abierta, setAbierta] = useState(null);
 
-  const base = (equipo.manuales || []).find((m) => m.driveId && m.tipo === "tecnico") || (equipo.manuales || []).find((m) => m.driveId);
+  const base = (equipo.manuales || []).find((m) => (m.driveId || m.url) && m.tipo === "tecnico") || (equipo.manuales || []).find((m) => m.driveId || m.url);
 
   const buscar = async () => {
     setOcupado(true);
     setEstado(base ? "Leyendo el manual y buscando en foros…" : "Buscando en foros y la web…");
     try {
-      const r = await api("fallas", { equipo: { nombre: equipo.nombre, marca: equipo.marca, modelo: equipo.modelo }, driveId: base && base.driveId, titulo: base && base.titulo });
+      const r = await api("fallas", { equipo: { nombre: equipo.nombre, marca: equipo.marca, modelo: equipo.modelo }, driveId: base && base.driveId, url: base && base.url, titulo: base && base.titulo });
       const existentes = new Set(fallas.map((f) => f.falla.toLowerCase().trim()));
       const nuevas = r.fallas.filter((f) => !existentes.has(f.falla.toLowerCase().trim())).map((f) => ({ ...f, id: "f" + Date.now() + Math.random().toString(36).slice(2, 6), notas: [] }));
       onUpdate({ fallas: [...fallas, ...nuevas], fuentesFallas: r.fuentes });
@@ -815,13 +815,13 @@ function TabArchivos({ equipo, onUpdate }) {
 }
 
 function TabConsulta({ equipo }) {
-  const enDrive = (equipo.manuales || []).filter((m) => m.driveId).length;
+  const enDrive = (equipo.manuales || []).filter((m) => m.driveId || m.url).length;
   const [mensajes, setMensajes] = useState([
     {
       rol: "bot",
       texto: enDrive
-        ? `Preguntame lo que necesites del ${equipo.nombre}. Respondo leyendo sus ${enDrive} manual(es) guardados en Drive y te cito la página.`
-        : `Todavía no hay manuales en Drive para el ${equipo.nombre}; voy a responder buscando en la web. Cargá el manual en la pestaña Manuales para respuestas exactas.`,
+        ? `Preguntame lo que necesites del ${equipo.nombre}. Respondo leyendo sus ${enDrive} manual(es) y te cito la página.`
+        : `Todavía no hay manuales para el ${equipo.nombre}; voy a responder buscando en la web. Cargá el manual en la pestaña Manuales para respuestas exactas.`,
       fuentes: [],
     },
   ]);
@@ -1246,13 +1246,13 @@ function App() {
           ) : (
             <div className="grid">
               {resultados.map((e) => {
-                const enD = (e.manuales || []).filter((m) => m.driveId).length;
+                const enD = (e.manuales || []).filter((m) => m.driveId || m.url).length;
                 return (
                   <button className="card" key={e.id} onClick={() => setEquipoAbierto(e.id)}>
                     <h3>{e.nombre}</h3>
                     <div className="meta">{[e.marca, e.modelo].filter(Boolean).join(" ") || e.tipoEquipo}</div>
                     <div className="badge-row">
-                      <span className={`badge ${enD ? "ok" : "warn"}`}>{enD} manuales en Drive</span>
+                      <span className={`badge ${enD ? "ok" : "warn"}`}>{enD} manuales</span>
                       <span className="badge">{(e.fallas || []).length} fallas</span>
                       <span className="badge">{(e.videos || []).length} videos</span>
                       <span className="badge">{(e.insumos || []).length} insumos</span>
