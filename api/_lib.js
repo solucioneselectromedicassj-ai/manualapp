@@ -15,6 +15,10 @@ function getCfg(req) {
     geminiKey: h("x-gemini-key") || process.env.GEMINI_API_KEY || "",
     geminiModel: h("x-gemini-model") || process.env.GEMINI_MODEL || "gemini-flash-latest",
     youtubeKey: h("x-youtube-key") || process.env.YOUTUBE_API_KEY || "",
+    grokKey: h("x-grok-key") || process.env.XAI_API_KEY || "",
+    grokModel: h("x-grok-model") || process.env.GROK_MODEL || "grok-4.7",
+    deepseekKey: h("x-deepseek-key") || process.env.DEEPSEEK_API_KEY || "",
+    deepseekModel: h("x-deepseek-model") || process.env.DEEPSEEK_MODEL || "deepseek-flash",
     clientId: process.env.GOOGLE_CLIENT_ID || "",
     clientSecret: process.env.GOOGLE_CLIENT_SECRET || "",
     refreshToken: h("x-google-refresh-token") || process.env.GOOGLE_REFRESH_TOKEN || "",
@@ -312,6 +316,132 @@ async function geminiConBusqueda(cfg, { contents, systemInstruction, consultas, 
   return { text: r.text, chunks: top.slice(0, 5).map((x) => ({ uri: x.url, title: x.titulo })), resultados: top };
 }
 
+// ---------------------------------------------------------------------------
+// VARIAS IAs (Gemini, Grok, DeepSeek)
+// ---------------------------------------------------------------------------
+const NOMBRE_IA = { gemini: "Gemini", grok: "Grok", deepseek: "DeepSeek" };
+
+function iasDisponibles(cfg) {
+  return ["gemini", "grok", "deepseek"].filter((ia) => cfg[ia + "Key"]);
+}
+
+async function grok(cfg, { system, prompt, web }, ms) {
+  const r = await fetchTimeout(
+    "https://api.x.ai/v1/responses",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: "Bearer " + cfg.grokKey },
+      body: JSON.stringify({
+        model: cfg.grokModel,
+        input: [...(system ? [{ role: "system", content: system }] : []), { role: "user", content: prompt }],
+        ...(web ? { tools: [{ type: "web_search" }] } : {}),
+      }),
+    },
+    ms
+  );
+  const j = await r.json();
+  if (!r.ok) throw fail(r.status, "Grok: " + ((j.error && (j.error.message || j.error)) || j.message || r.status));
+  let text = j.output_text || "";
+  const fuentes = [];
+  (j.output || []).forEach((o) =>
+    (o.content || []).forEach((c) => {
+      if (c.type === "output_text") {
+        if (!j.output_text) text += c.text || "";
+        (c.annotations || []).forEach((a) => a.url && fuentes.push({ uri: a.url, title: a.title || a.url }));
+      }
+    })
+  );
+  (j.citations || []).forEach((u) => typeof u === "string" && fuentes.push({ uri: u, title: u }));
+  return { text, chunks: fuentes };
+}
+
+async function deepseek(cfg, { system, prompt }, ms) {
+  const r = await fetchTimeout(
+    "https://api.deepseek.com/chat/completions",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: "Bearer " + cfg.deepseekKey },
+      body: JSON.stringify({
+        model: cfg.deepseekModel,
+        messages: [...(system ? [{ role: "system", content: system }] : []), { role: "user", content: prompt }],
+        reasoning_effort: "low",
+        stream: false,
+      }),
+    },
+    ms
+  );
+  const j = await r.json();
+  if (!r.ok) throw fail(r.status, "DeepSeek: " + ((j.error && j.error.message) || r.status));
+  return { text: (j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content) || "", chunks: [] };
+}
+
+// Pregunta a una IA en modo texto. web=true: Gemini y Grok buscan solos;
+// a DeepSeek (sin busqueda propia) se le pasan resultados de Bing.
+// `consultas` son las busquedas a usar cuando hace falta buscar "a mano".
+async function preguntarIA(cfg, ia, { system, prompt, web, consultas = [] }, ms = 40000) {
+  if (ia === "gemini") {
+    const contents = [{ role: "user", parts: [{ text: prompt }] }];
+    const systemInstruction = system ? { parts: [{ text: system }] } : undefined;
+    const r = web ? await geminiConBusqueda(cfg, { contents, systemInstruction, consultas }) : await gemini(cfg, { contents, systemInstruction }, ms);
+    return { ia, text: r.text, chunks: r.chunks || [], resultados: r.resultados || [] };
+  }
+  if (ia === "grok") return { ia, ...(await grok(cfg, { system, prompt, web }, ms)), resultados: [] };
+  if (ia === "deepseek") {
+    let ctx = "";
+    let resultados = [];
+    if (web && consultas.length) {
+      resultados = (await Promise.all(consultas.map(buscarWeb))).flat().slice(0, 15);
+      if (resultados.length) ctx = "Resultados de busqueda web:\n" + resultados.map((x, i) => `${i + 1}. ${x.titulo}\n   ${x.url}\n   ${x.snippet}`).join("\n") + "\n\n";
+    }
+    const r = await deepseek(cfg, { system, prompt: ctx + prompt }, ms);
+    return { ia, ...r, chunks: resultados.slice(0, 5).map((x) => ({ uri: x.url, title: x.titulo })), resultados };
+  }
+  throw fail(400, "IA desconocida: " + ia);
+}
+
+// Pregunta a todas las IAs configuradas en paralelo.
+// Devuelve [{ia, ok, text, chunks, resultados, error}].
+async function preguntarTodas(cfg, opts, ms) {
+  const ias = iasDisponibles(cfg);
+  if (!ias.length) throw fail(400, "No hay ninguna IA configurada. Cargá al menos la clave de Gemini en Configuración.");
+  const rs = await Promise.allSettled(ias.map((ia) => preguntarIA(cfg, ia, opts, ms)));
+  return rs.map((r, i) => (r.status === "fulfilled" ? { ...r.value, ok: true } : { ia: ias[i], ok: false, error: r.reason.message }));
+}
+
+// La primera IA que responda, en orden de preferencia (si Gemini falla por
+// cupo, responde Grok o DeepSeek).
+async function preguntarPrimera(cfg, opts, ms) {
+  const ias = iasDisponibles(cfg);
+  if (!ias.length) throw fail(400, "No hay ninguna IA configurada. Cargá al menos la clave de Gemini en Configuración.");
+  let ultimo;
+  for (const ia of ias) {
+    try {
+      return await preguntarIA(cfg, ia, opts, ms);
+    } catch (e) {
+      ultimo = e;
+    }
+  }
+  throw ultimo;
+}
+
+// Una IA "jueza" elige la mejor respuesta. Devuelve {mejor, motivo}.
+async function elegirMejor(cfg, pregunta, respuestas) {
+  const validas = respuestas.filter((r) => r.ok && r.text.trim());
+  if (validas.length <= 1) return { mejor: validas[0] ? validas[0].ia : null, motivo: "" };
+  const juez = iasDisponibles(cfg)[0];
+  const prompt = `Pregunta tecnica de ingenieria biomedica: "${pregunta}"
+
+${validas.map((r) => `### Respuesta de ${r.ia}\n${r.text.slice(0, 6000)}`).join("\n\n")}
+
+Evaluá cual respuesta es mas correcta, especifica, segura y util para un tecnico (preferí la que cita manual o fuentes verificables y no inventa datos). Respondé solo JSON: {"mejor":"${validas.map((r) => r.ia).join("|")}","motivo":"una frase"}`;
+  try {
+    const r = await preguntarIA(cfg, juez, { prompt }, 20000);
+    const d = parseJson(r.text) || {};
+    if (validas.some((v) => v.ia === d.mejor)) return { mejor: d.mejor, motivo: d.motivo || "", juez };
+  } catch (e) {}
+  return { mejor: validas[0].ia, motivo: "", juez: null };
+}
+
 // Extrae el primer bloque JSON de un texto (Gemini con google_search no
 // acepta responseMimeType json, asi que se parsea a mano).
 function parseJson(text) {
@@ -405,6 +535,12 @@ module.exports = {
   driveMeta,
   gemini,
   geminiConBusqueda,
+  NOMBRE_IA,
+  iasDisponibles,
+  preguntarIA,
+  preguntarTodas,
+  preguntarPrimera,
+  elegirMejor,
   parseJson,
   geminiUriForDrive,
   geminiUriForManual,

@@ -30,6 +30,8 @@ function headersCfg() {
   if (c.geminiKey) h["x-gemini-key"] = c.geminiKey;
   if (c.geminiModel) h["x-gemini-model"] = c.geminiModel;
   if (c.youtubeKey) h["x-youtube-key"] = c.youtubeKey;
+  if (c.grokKey) h["x-grok-key"] = c.grokKey;
+  if (c.deepseekKey) h["x-deepseek-key"] = c.deepseekKey;
   if (c.refreshToken) h["x-google-refresh-token"] = c.refreshToken;
   if (c.folderId) h["x-drive-folder"] = c.folderId;
   return h;
@@ -54,6 +56,22 @@ async function api(path, body, method) {
 async function sha256(txt) {
   const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(txt));
   return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+const IAS = { gemini: "Gemini", grok: "Grok", deepseek: "DeepSeek" };
+const nombresIA = (ias) => (ias || []).map((i) => IAS[i] || i).join(" + ");
+
+// Ranking: cuantos links sugirio cada IA y cuantos resultaron PDFs reales.
+function rankingIAs(equipos) {
+  const t = {};
+  Object.keys(IAS).forEach((k) => (t[k] = { sugeridos: 0, validos: 0, fallas: 0, consultas: 0 }));
+  equipos.forEach((e) => {
+    (e.candidatos || []).forEach((c) => (c.ias || []).forEach((i) => t[i] && t[i].sugeridos++));
+    (e.manuales || []).forEach((m) => (m.ias || []).forEach((i) => t[i] && t[i].validos++));
+    (e.fallas || []).forEach((f) => (f.ias || []).forEach((i) => t[i] && t[i].fallas++));
+    Object.entries(e.consultasGanadas || {}).forEach(([i, n]) => t[i] && (t[i].consultas += n));
+  });
+  return t;
 }
 
 const TIPOS = { usuario: "Manual de usuario", tecnico: "Manual técnico", despiece: "Manual de despiece" };
@@ -184,7 +202,7 @@ async function descargarManuales(equipo, candidatos, tipos, onPaso) {
       try {
         const r = await api("descargar", { url: c.url, tipo, titulo: c.titulo, equipo: equipo.nombre, modelo: equipo.modelo });
         if (r.ok) {
-          ok = r.manual;
+          ok = { ...r.manual, ias: c.ias || [] };
           usados.add(c.url);
           usados.add(r.manual.url);
           break;
@@ -196,7 +214,8 @@ async function descargarManuales(equipo, candidatos, tipos, onPaso) {
     }
     if (ok) {
       obtenidos.push(ok);
-      onPaso(tipo, "ok", ok.driveId ? "guardado en Drive (" + ok.fuente + ")" : ok.aviso || ok.fuente);
+      const por = ok.ias.length ? " · encontrado por " + nombresIA(ok.ias) : "";
+      onPaso(tipo, "ok", (ok.driveId ? "guardado en Drive (" + ok.fuente + ")" : "PDF válido (" + ok.fuente + "), falta conectar Drive") + por);
     } else onPaso(tipo, "error", "no se encontró PDF descargable: " + ultimo);
   }
   return obtenidos;
@@ -246,7 +265,8 @@ function ModalAgregarEquipo({ nombreInicial, onClose, onCreado }) {
         return;
       }
       if (cancel) return;
-      paso("buscar", "ok", `${[info.marca, info.modelo].filter(Boolean).join(" ") || info.nombre} · ${info.manuales.length} links candidatos`);
+      const porIA = (info.ias || []).map((r) => `${IAS[r.ia]} ${r.ok ? r.links + " links" : "✕"}`).join(" · ");
+      paso("buscar", "ok", `${[info.marca, info.modelo].filter(Boolean).join(" ") || info.nombre} · ${info.manuales.length} links candidatos${porIA ? " (" + porIA + ")" : ""}`);
 
       let eq = {
         id: "eq-" + Date.now(),
@@ -419,6 +439,7 @@ function TabManuales({ equipo, onUpdate }) {
             <a href={m.driveLink || m.url} target="_blank" rel="noreferrer">{m.titulo || TIPOS[m.tipo] || "Manual"}</a>
             <div className="small muted">
               {m.driveId ? "✓ en Drive" : "⚠ solo link externo"}
+              {(m.ias || []).length > 0 && " · encontrado por " + nombresIA(m.ias)}
               {m.fuente && " · " + m.fuente}
               {m.tamano ? " · " + (m.tamano / 1048576).toFixed(1) + " MB" : ""}
               {m.url && m.driveLink && (
@@ -676,7 +697,7 @@ function TabFallas({ equipo, onUpdate }) {
           <div className="falla" key={f.id}>
             <button className="falla-head" onClick={() => setAbierta(abierta === f.id ? null : f.id)}>
               <span className="grow">{f.falla}</span>
-              <span className={"tag " + (f.origen === "propia" ? "tag-ok" : "")}>{ORIGEN_FALLA[f.origen] || f.origen}{f.pagina ? " · pág. " + f.pagina : ""}</span>
+              <span className={"tag " + (f.origen === "propia" ? "tag-ok" : "")}>{ORIGEN_FALLA[f.origen] || f.origen}{f.pagina ? " · pág. " + f.pagina : ""}{(f.ias || []).length ? " · " + nombresIA(f.ias) : ""}</span>
               {(f.notas || []).length > 0 && <span className="tag tag-ok">+{f.notas.length}</span>}
             </button>
             {abierta === f.id && (
@@ -814,7 +835,7 @@ function TabArchivos({ equipo, onUpdate }) {
   );
 }
 
-function TabConsulta({ equipo }) {
+function TabConsulta({ equipo, iasActivas = [], onUpdate }) {
   const enDrive = (equipo.manuales || []).filter((m) => m.driveId || m.url).length;
   const [mensajes, setMensajes] = useState([
     {
@@ -827,7 +848,9 @@ function TabConsulta({ equipo }) {
   ]);
   const [input, setInput] = useState("");
   const [cargando, setCargando] = useState(false);
+  const [comparar, setComparar] = useState(() => leerLS("msem.comparar", false));
   const scrollRef = useRef(null);
+  const puedeComparar = iasActivas.length > 1;
 
   useEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
@@ -853,9 +876,15 @@ function TabConsulta({ equipo }) {
           fallas: (equipo.fallas || []).map((f) => ({ falla: f.falla, solucion: f.solucion, origen: f.origen, notas: (f.notas || []).filter((n) => n.texto !== "Foto").map((n) => ({ texto: n.texto })) })),
         },
         pregunta,
-        historial,
+        historial: historial.map((m) => ({ rol: m.rol, texto: m.texto })),
+        comparar: comparar && puedeComparar,
       });
-      setMensajes((prev) => [...prev, { rol: "bot", texto: r.respuesta, fuentes: r.fuentes || [], modo: r.modo }]);
+      setMensajes((prev) => [...prev, { rol: "bot", texto: r.respuesta, fuentes: r.fuentes || [], modo: r.modo, ia: r.ia, comparacion: r.comparacion }]);
+      if (r.comparacion && r.comparacion.mejor) {
+        const g = { ...(equipo.consultasGanadas || {}) };
+        g[r.comparacion.mejor] = (g[r.comparacion.mejor] || 0) + 1;
+        onUpdate({ consultasGanadas: g });
+      }
     } catch (e) {
       setMensajes((prev) => [...prev, { rol: "bot", texto: "✕ " + e.message, fuentes: [] }]);
     }
@@ -867,6 +896,11 @@ function TabConsulta({ equipo }) {
       <div className="chat-messages" ref={scrollRef}>
         {mensajes.map((m, i) => (
           <div key={i} className={`msg ${m.rol === "user" ? "user" : "bot"}`}>
+            {m.comparacion ? (
+              <div className="ia-ganadora">🏆 Mejor respuesta: {IAS[m.comparacion.mejor]}{m.comparacion.motivo && <span className="muted"> — {m.comparacion.motivo}</span>}</div>
+            ) : m.ia && puedeComparar ? (
+              <div className="small muted">{IAS[m.ia]}</div>
+            ) : null}
             {m.texto}
             {m.fuentes && m.fuentes.length > 0 && (
               <div className="sources">
@@ -879,10 +913,22 @@ function TabConsulta({ equipo }) {
                 ))}
               </div>
             )}
+            {m.comparacion && m.comparacion.respuestas.filter((x) => x.ia !== m.comparacion.mejor).map((x) => (
+              <details className="otra-ia" key={x.ia}>
+                <summary>{IAS[x.ia]} {x.ok ? "" : "✕ no respondió"}</summary>
+                <div className="pre">{x.ok ? x.text : x.error}</div>
+              </details>
+            ))}
           </div>
         ))}
-        {cargando && <div className="msg bot"><span className="spinner" /> Leyendo el manual…</div>}
+        {cargando && <div className="msg bot"><span className="spinner" /> {comparar && puedeComparar ? "Consultando " + iasActivas.map((i) => IAS[i]).join(", ") + "…" : "Leyendo el manual…"}</div>}
       </div>
+      {puedeComparar && (
+        <label className="comparar">
+          <input type="checkbox" checked={comparar} onChange={(e) => { setComparar(e.target.checked); guardarLS("msem.comparar", e.target.checked); }} />
+          Comparar IAs ({iasActivas.map((i) => IAS[i]).join(", ")}) y quedarme con la mejor
+        </label>
+      )}
       <div className="chat-input">
         <input placeholder="Ej: ¿Cómo se calibra el módulo de NIBP?" value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => e.key === "Enter" && enviar()} />
         <button className="btn primary" onClick={enviar} disabled={cargando}>Enviar</button>
@@ -891,7 +937,7 @@ function TabConsulta({ equipo }) {
   );
 }
 
-function FichaEquipo({ equipo, todosLosEquipos, onVolver, onUpdate, onBorrar }) {
+function FichaEquipo({ equipo, todosLosEquipos, onVolver, onUpdate, onBorrar, iasActivas }) {
   const [tab, setTab] = useState("consulta");
   const alertas = useMemo(() => detectarRepuestosCompartidos(equipo, todosLosEquipos), [equipo, todosLosEquipos]);
   const tabs = [
@@ -919,7 +965,7 @@ function FichaEquipo({ equipo, todosLosEquipos, onVolver, onUpdate, onBorrar }) 
           <button key={t.id} className={`tab ${tab === t.id ? "active" : ""}`} onClick={() => setTab(t.id)}>{t.label}</button>
         ))}
       </div>
-      {tab === "consulta" && <TabConsulta key={equipo.id} equipo={equipo} />}
+      {tab === "consulta" && <TabConsulta key={equipo.id} equipo={equipo} iasActivas={iasActivas} onUpdate={onUpdate} />}
       {tab === "fallas" && <TabFallas equipo={equipo} onUpdate={onUpdate} />}
       {tab === "archivos" && <TabArchivos equipo={equipo} onUpdate={onUpdate} />}
       {tab === "manuales" && <TabManuales equipo={equipo} onUpdate={onUpdate} />}
@@ -1063,14 +1109,59 @@ function GuiaApis({ estado }) {
         </ol>
       </Paso>
 
-      <Paso ok={e.pinServidor} titulo="4. PIN común (recomendado)">
+      <Paso ok={e.grok} titulo="4. Grok (opcional, pago por uso)">
+        <ol>
+          <li>Creá la clave en <L href="https://console.x.ai/team/default/api-keys">consola de xAI → API keys</L> (necesita saldo cargado en Billing).</li>
+          <li>Copiala a Vercel como <code>XAI_API_KEY</code> (o pegala abajo).</li>
+        </ol>
+      </Paso>
+
+      <Paso ok={e.deepseek} titulo="5. DeepSeek (opcional, muy barato)">
+        <ol>
+          <li>Creá la clave en <L href="https://platform.deepseek.com/api_keys">DeepSeek Platform → API keys</L> y cargá unos dólares en <L href="https://platform.deepseek.com/top_up">Top up</L>.</li>
+          <li>Copiala a Vercel como <code>DEEPSEEK_API_KEY</code> (o pegala abajo).</li>
+        </ol>
+      </Paso>
+
+      <Paso ok={e.pinServidor} titulo="6. PIN común (recomendado)">
         <p className="small">Agregá en Vercel <code>ADMIN_PIN</code> con el PIN que quieras: así todos entran a Configuración con el mismo PIN.</p>
       </Paso>
     </div>
   );
 }
 
-function ModalConfig({ onClose, onGuardado }) {
+function Ranking({ equipos }) {
+  const t = rankingIAs(equipos);
+  const filas = Object.entries(t).filter(([, v]) => v.sugeridos || v.validos || v.fallas || v.consultas);
+  if (!filas.length) return null;
+  const tasa = (v) => (v.sugeridos ? Math.round((100 * v.validos) / v.sugeridos) : 0);
+  filas.sort((a, b) => b[1].validos - a[1].validos || tasa(b[1]) - tasa(a[1]));
+  return (
+    <div className="panel-sub">
+      <div className="section-title"><h4>Ranking de IAs</h4></div>
+      <p className="small muted">Qué IA encontró de verdad los manuales (PDF que se pudo descargar), sobre toda tu biblioteca.</p>
+      <table className="ranking">
+        <thead>
+          <tr><th>IA</th><th>PDF válidos</th><th>Links</th><th>Acierto</th><th>Fallas</th><th>🏆 Consultas</th></tr>
+        </thead>
+        <tbody>
+          {filas.map(([ia, v], i) => (
+            <tr key={ia}>
+              <td>{i === 0 ? "🥇 " : ""}{IAS[ia]}</td>
+              <td>{v.validos}</td>
+              <td>{v.sugeridos}</td>
+              <td>{tasa(v)}%</td>
+              <td>{v.fallas}</td>
+              <td>{v.consultas}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function ModalConfig({ onClose, onGuardado, equipos = [] }) {
   const [cfg, setCfg] = useState(() => leerLS(LS_CFG, {}));
   const [estado, setEstado] = useState(null);
   const [probando, setProbando] = useState(false);
@@ -1078,7 +1169,7 @@ function ModalConfig({ onClose, onGuardado }) {
   const probar = async () => {
     setProbando(true);
     try {
-      setEstado(await api("estado"));
+      setEstado(await api("estado?probar=1"));
     } catch (e) {
       setEstado({ error: e.message });
     }
@@ -1106,7 +1197,21 @@ function ModalConfig({ onClose, onGuardado }) {
           {estado && estado.error && <div className="alert">{estado.error}</div>}
           {estado && !estado.error && (
             <div>
-              <Estado ok={estado.gemini} label={`Gemini (IA de búsqueda y consultas) · ${estado.geminiModel}`} detalle={!estado.gemini && "Obligatoria. Clave gratis en aistudio.google.com/apikey"} />
+              {[
+                ["gemini", "Gemini (lee los PDF; obligatoria)", estado.geminiModel, "Clave gratis en aistudio.google.com/apikey"],
+                ["grok", "Grok (opcional)", estado.grokModel, "Opcional: segunda opinión con búsqueda web propia"],
+                ["deepseek", "DeepSeek (opcional)", estado.deepseekModel, "Opcional: tercera opinión, muy económica"],
+              ].map(([k, label, modelo, falta]) => {
+                const p = (estado.pruebas || {})[k];
+                return (
+                  <Estado
+                    key={k}
+                    ok={estado[k] && (!p || p.ok)}
+                    label={`${label} · ${modelo}`}
+                    detalle={!estado[k] ? falta : p && !p.ok ? "La clave no funciona: " + p.error : p ? "Probada ✓" : ""}
+                  />
+                );
+              })}
               <Estado ok={estado.drive} label="Google Drive (donde se alojan los manuales)" detalle={estado.drive ? "Carpeta: Manuales SEM" : !estado.driveCliente ? "Faltan GOOGLE_CLIENT_ID y GOOGLE_CLIENT_SECRET en Vercel" : estado.driveError || "Falta conectar la cuenta"} />
               <Estado ok={estado.youtube} label="YouTube Data API (opcional)" detalle={!estado.youtube && "Sin esta clave se usan solo los videos que encuentra Gemini"} />
             </div>
@@ -1116,6 +1221,8 @@ function ModalConfig({ onClose, onGuardado }) {
           )}
         </div>
 
+        <Ranking equipos={equipos} />
+
         <GuiaApis estado={estado} />
 
         <div className="panel-sub">
@@ -1123,6 +1230,8 @@ function ModalConfig({ onClose, onGuardado }) {
           <p className="small muted">Opcional: lo ideal es cargarlas como variables de entorno en Vercel (quedan para todos). Lo que pongas acá se guarda solo en este dispositivo y tiene prioridad.</p>
           <label>Gemini API key<input className="field" type="password" value={cfg.geminiKey || ""} onChange={set("geminiKey")} placeholder="AIza…" /></label>
           <label>Modelo Gemini<input className="field" value={cfg.geminiModel || ""} onChange={set("geminiModel")} placeholder="gemini-flash-latest" /></label>
+          <label>Grok (xAI) API key<input className="field" type="password" value={cfg.grokKey || ""} onChange={set("grokKey")} placeholder="xai-…" /></label>
+          <label>DeepSeek API key<input className="field" type="password" value={cfg.deepseekKey || ""} onChange={set("deepseekKey")} placeholder="sk-…" /></label>
           <label>YouTube API key<input className="field" type="password" value={cfg.youtubeKey || ""} onChange={set("youtubeKey")} placeholder="AIza…" /></label>
           <label>Drive refresh token<input className="field" type="password" value={cfg.refreshToken || ""} onChange={set("refreshToken")} placeholder="se completa con “Conectar Google Drive”" /></label>
           <label>ID de carpeta de Drive (opcional)<input className="field" value={cfg.folderId || ""} onChange={set("folderId")} placeholder="por defecto crea “Manuales SEM”" /></label>
@@ -1173,6 +1282,14 @@ function App() {
   const [agregando, setAgregando] = useState(null);
   const [config, setConfig] = useState(null); // null | "pin" | "abierta"
   const inst = useInstalar();
+  const [iasActivas, setIasActivas] = useState([]);
+  const cargarEstado = () =>
+    api("estado")
+      .then((e) => setIasActivas(Object.keys(IAS).filter((k) => e[k])))
+      .catch(() => setIasActivas([]));
+  useEffect(() => {
+    cargarEstado();
+  }, []);
 
   const term = busqueda.trim().toLowerCase();
 
@@ -1268,6 +1385,7 @@ function App() {
 
       {equipoActual && (
         <FichaEquipo
+          iasActivas={iasActivas}
           equipo={equipoActual}
           todosLosEquipos={equipos}
           onVolver={() => setEquipoAbierto(null)}
@@ -1293,7 +1411,7 @@ function App() {
       )}
 
       {config === "pin" && <PinGate onOk={() => setConfig("abierta")} onClose={() => setConfig(null)} />}
-      {config === "abierta" && <ModalConfig onClose={() => setConfig(null)} onGuardado={recargar} />}
+      {config === "abierta" && <ModalConfig equipos={equipos} onClose={() => setConfig(null)} onGuardado={() => { recargar(); cargarEstado(); }} />}
 
       <footer className="note">
         {enDrive ? "✓ Biblioteca sincronizada con Google Drive" : "Biblioteca local"} · Las claves de las IA quedan del lado del servidor.

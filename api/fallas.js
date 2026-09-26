@@ -1,7 +1,7 @@
 // POST {equipo:{nombre,marca,modelo}, driveId?, titulo?}
 // Fallas mas comunes y como repararlas: del manual (seccion de solucion de
 // problemas / codigos de error) y de la web (foros, videos, service notes).
-const { handler, send, fail, gemini, geminiConBusqueda, parseJson, geminiUriForManual } = require("./_lib");
+const { handler, send, fail, gemini, preguntarTodas, parseJson, geminiUriForManual } = require("./_lib");
 
 const FORMATO = `Respondé solo JSON: {"fallas":[{"falla":"sintoma o mensaje de error","causas":"causas probables","solucion":"pasos de reparacion concretos","pagina":0}]}. Entre 5 y 15 fallas, las mas frecuentes primero, en español.`;
 
@@ -22,15 +22,34 @@ module.exports = handler(async (req, res, cfg) => {
   const nombre = [equipo.nombre, equipo.marca, equipo.modelo].filter(Boolean).join(" ");
   if (!nombre) throw fail(400, "falta equipo");
 
-  const web = geminiConBusqueda(cfg, {
-    consultas: [`${nombre} troubleshooting error codes`, `${nombre} common problems repair`, `${nombre} falla reparacion`],
-    contents: [
-      {
-        role: "user",
-        parts: [{ text: `Buscá en internet (foros de biomedicos, service notes, videos, grupos tecnicos) las fallas mas comunes del equipo medico "${nombre}" y como se reparan. ${FORMATO}` }],
-      },
-    ],
-  }).then((r) => ({ fallas: limpiar(parseJson(r.text), "web"), fuentes: r.chunks.slice(0, 5).map((c) => ({ titulo: c.title, url: c.uri })) }));
+  // Todas las IAs configuradas buscan en paralelo; cada falla queda marcada
+  // con la IA que la aporto. Las repetidas se unen.
+  const web = preguntarTodas(
+    cfg,
+    {
+      prompt: `Buscá en internet (foros de biomedicos, service notes, videos, grupos tecnicos) las fallas mas comunes del equipo medico "${nombre}" y como se reparan. ${FORMATO}`,
+      web: true,
+      consultas: [`${nombre} troubleshooting error codes`, `${nombre} common problems repair`, `${nombre} falla reparacion`],
+    },
+    42000
+  ).then((rs) => {
+    const fallas = [];
+    const clave = (t) => t.toLowerCase().replace(/[^a-z0-9áéíóúñ]+/g, " ").trim().slice(0, 40);
+    rs.filter((r) => r.ok).forEach((r) =>
+      limpiar(parseJson(r.text), "web").forEach((f) => {
+        const ya = fallas.find((x) => clave(x.falla) === clave(f.falla));
+        if (ya) {
+          if (!ya.ias.includes(r.ia)) ya.ias.push(r.ia);
+        } else fallas.push({ ...f, ias: [r.ia] });
+      })
+    );
+    if (!rs.some((r) => r.ok)) throw new Error(rs.map((r) => r.error).join(" · "));
+    return {
+      fallas: fallas.sort((x, y) => y.ias.length - x.ias.length).slice(0, 20),
+      fuentes: rs.flatMap((r) => (r.chunks || []).slice(0, 3)).map((c) => ({ titulo: c.title, url: c.uri })),
+      ias: rs.map((r) => ({ ia: r.ia, ok: r.ok, error: r.error })),
+    };
+  });
 
   const manual = driveId || url
     ? geminiUriForManual(cfg, { driveId, url, titulo })
@@ -48,7 +67,7 @@ module.exports = handler(async (req, res, cfg) => {
             generationConfig: { temperature: 0.1, responseMimeType: "application/json" },
           })
         )
-        .then((r) => limpiar(parseJson(r.text), "manual"))
+        .then((r) => limpiar(parseJson(r.text), "manual").map((f) => ({ ...f, ias: ["gemini"] })))
     : Promise.resolve([]);
 
   const [w, m] = await Promise.allSettled([web, manual]);
@@ -56,6 +75,7 @@ module.exports = handler(async (req, res, cfg) => {
   send(res, 200, {
     fallas: [...(m.status === "fulfilled" ? m.value : []), ...(w.status === "fulfilled" ? w.value.fallas : [])],
     fuentes: w.status === "fulfilled" ? w.value.fuentes : [],
+    ias: w.status === "fulfilled" ? w.value.ias : [],
     avisos: [w, m].filter((x) => x.status === "rejected").map((x) => x.reason.message),
   });
 });

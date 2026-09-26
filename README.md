@@ -26,6 +26,8 @@ En Vercel → proyecto → **Settings → Environment Variables**:
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | sí (Drive) | ver abajo |
 | `GOOGLE_REFRESH_TOKEN` | sí (Drive) | lo genera la app con “Conectar Google Drive” |
 | `ADMIN_PIN` | recomendado | PIN para entrar a Configuración (si no está, cada dispositivo crea el suyo) |
+| `XAI_API_KEY` | no | Grok: [consola xAI → API keys](https://console.x.ai/team/default/api-keys) (pago por uso) |
+| `DEEPSEEK_API_KEY` | no | DeepSeek: [Platform → API keys](https://platform.deepseek.com/api_keys) + [Top up](https://platform.deepseek.com/top_up) |
 | `YOUTUBE_API_KEY` | no | [Habilitar YouTube Data API v3](https://console.cloud.google.com/apis/library/youtube.googleapis.com) → [Credenciales](https://console.cloud.google.com/apis/credentials) → Clave de API |
 | `DRIVE_FOLDER_ID` | no | si no se pone, la app crea la carpeta “Manuales SEM” |
 | `GEMINI_MODEL` | no | por defecto `gemini-flash-latest` |
@@ -38,6 +40,12 @@ En Vercel → proyecto → **Settings → Environment Variables**:
 5. En la app: ⚙ Configuración → **Conectar Google Drive** → aceptás → copiás el token que muestra a `GOOGLE_REFRESH_TOKEN` en Vercel y redeployá (o “Guardar en este navegador” para probar ya).
 
 La misma guía con links está en la app: ⚙ Configuración → *Guía rápida*.
+
+## Varias IAs (Gemini, Grok, DeepSeek)
+- Al agregar un equipo, todas las IAs configuradas buscan los manuales en paralelo. Cada link queda marcado con la IA que lo sugirió; la app lo descarga y solo se queda con PDFs reales, así que el **Ranking de IAs** (en Configuración) mide cuál encuentra de verdad los manuales.
+- Las fallas comunes se juntan de todas las IAs.
+- En Consulta, la casilla **Comparar IAs** pregunta a todas y una IA jueza elige la mejor respuesta (las demás quedan desplegables). Solo Gemini lee los PDF; Grok y DeepSeek responden con búsqueda web.
+- Si Gemini se queda sin cupo, responde la siguiente IA disponible.
 
 ## Fallas, fotos y archivos
 - **Fallas**: busca las fallas más comunes en el manual (troubleshooting) y en foros; podés registrar las tuyas con su reparación y foto, y sumar otras formas de reparar. Las consultas usan ese registro propio.
