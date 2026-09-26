@@ -138,6 +138,37 @@ function unirItems(actuales, nuevos) {
   return out;
 }
 
+// Sube un archivo (Blob/File) directo del navegador a la carpeta de Drive.
+async function subirADrive(blob, nombre) {
+  const mime = blob.type || "application/octet-stream";
+  const { uploadUrl } = await api("subir", { nombre, mime, size: blob.size });
+  const up = await fetch(uploadUrl, { method: "PUT", headers: { "Content-Type": mime }, body: blob });
+  if (!up.ok) throw new Error("Drive rechazó la subida (" + up.status + ")");
+  const f = await up.json();
+  return { driveId: f.id, driveLink: f.webViewLink || `https://drive.google.com/file/d/${f.id}/view` };
+}
+
+// Achica una foto: devuelve un JPEG liviano para Drive y una miniatura
+// (dataURL de pocos KB) que se guarda en la ficha para verla sin conexion.
+function reducirImagen(file, max, calidad) {
+  return new Promise((ok, mal) => {
+    const img = new Image();
+    img.onload = () => {
+      const k = Math.min(1, max / Math.max(img.width, img.height));
+      const c = document.createElement("canvas");
+      c.width = Math.round(img.width * k);
+      c.height = Math.round(img.height * k);
+      c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+      URL.revokeObjectURL(img.src);
+      c.toBlob((b) => ok({ blob: b, dataUrl: max <= 320 ? c.toDataURL("image/jpeg", calidad) : null }), "image/jpeg", calidad);
+    };
+    img.onerror = () => mal(new Error("No se pudo leer la imagen"));
+    img.src = URL.createObjectURL(file);
+  });
+}
+
+const nombreSeguro = (s) => s.replace(/[\\/:*?"<>|]+/g, " ").replace(/\s+/g, " ").trim();
+
 // Prueba los candidatos de cada tipo hasta conseguir un PDF real en Drive.
 async function descargarManuales(equipo, candidatos, tipos, onPaso) {
   const obtenidos = [];
@@ -349,20 +380,9 @@ function TabManuales({ equipo, onUpdate }) {
     setOcupado(true);
     setEstado("Subiendo " + file.name + " a Drive…");
     try {
-      const nombre = `${equipo.nombre} - ${tipoNuevo} - ${file.name}`.replace(/\.pdf$/i, "") + ".pdf";
-      const { uploadUrl } = await api("subir", { nombre, mime: file.type || "application/pdf", size: file.size });
-      const up = await fetch(uploadUrl, { method: "PUT", headers: { "Content-Type": file.type || "application/pdf" }, body: file });
-      if (!up.ok) throw new Error("Drive rechazó la subida (" + up.status + ")");
-      const f = await up.json();
-      agregarManual({
-        tipo: tipoNuevo,
-        titulo: file.name.replace(/\.pdf$/i, ""),
-        url: "",
-        fuente: "subido a mano",
-        tamano: file.size,
-        driveId: f.id,
-        driveLink: f.webViewLink || `https://drive.google.com/file/d/${f.id}/view`,
-      });
+      const nombre = nombreSeguro(`${equipo.nombre} - ${tipoNuevo} - ${file.name}`.replace(/\.pdf$/i, "")) + ".pdf";
+      const d = await subirADrive(file, nombre);
+      agregarManual({ tipo: tipoNuevo, titulo: file.name.replace(/\.pdf$/i, ""), url: "", fuente: "subido a mano", tamano: file.size, ...d });
       setEstado("✓ Subido a Drive");
     } catch (e) {
       setEstado("✕ " + e.message);
@@ -550,6 +570,250 @@ function BotonExtraer({ equipo, onUpdate }) {
   );
 }
 
+const ORIGEN_FALLA = { manual: "del manual", web: "de la web", propia: "registro propio" };
+
+function FotoInput({ onFoto, disabled, label = "📷 Foto" }) {
+  const ref = useRef(null);
+  return (
+    <label className={"btn" + (disabled ? " disabled" : "")}>
+      {label}
+      <input
+        ref={ref}
+        type="file"
+        accept="image/*"
+        capture="environment"
+        hidden
+        disabled={disabled}
+        onChange={(e) => {
+          const f = e.target.files[0];
+          if (f) onFoto(f);
+          ref.current.value = "";
+        }}
+      />
+    </label>
+  );
+}
+
+// Sube una foto reducida a Drive y devuelve {thumb, driveId, driveLink}.
+// Si Drive no esta conectado se queda solo con la miniatura.
+async function procesarFoto(file, nombre) {
+  const [grande, mini] = await Promise.all([reducirImagen(file, 1600, 0.8), reducirImagen(file, 240, 0.6)]);
+  try {
+    const d = await subirADrive(grande.blob, nombreSeguro(nombre) + ".jpg");
+    return { thumb: mini.dataUrl, ...d };
+  } catch (e) {
+    return { thumb: mini.dataUrl, aviso: "solo miniatura (Drive: " + e.message + ")" };
+  }
+}
+
+function TabFallas({ equipo, onUpdate }) {
+  const fallas = equipo.fallas || [];
+  const [estado, setEstado] = useState("");
+  const [ocupado, setOcupado] = useState(false);
+  const [filtro, setFiltro] = useState("");
+  const [nueva, setNueva] = useState({ falla: "", solucion: "" });
+  const [foto, setFoto] = useState(null);
+  const [abierta, setAbierta] = useState(null);
+
+  const base = (equipo.manuales || []).find((m) => m.driveId && m.tipo === "tecnico") || (equipo.manuales || []).find((m) => m.driveId);
+
+  const buscar = async () => {
+    setOcupado(true);
+    setEstado(base ? "Leyendo el manual y buscando en foros…" : "Buscando en foros y la web…");
+    try {
+      const r = await api("fallas", { equipo: { nombre: equipo.nombre, marca: equipo.marca, modelo: equipo.modelo }, driveId: base && base.driveId, titulo: base && base.titulo });
+      const existentes = new Set(fallas.map((f) => f.falla.toLowerCase().trim()));
+      const nuevas = r.fallas.filter((f) => !existentes.has(f.falla.toLowerCase().trim())).map((f) => ({ ...f, id: "f" + Date.now() + Math.random().toString(36).slice(2, 6), notas: [] }));
+      onUpdate({ fallas: [...fallas, ...nuevas], fuentesFallas: r.fuentes });
+      setEstado(`✓ ${nuevas.length} fallas nuevas` + (r.avisos.length ? " · " + r.avisos.join(" · ") : ""));
+    } catch (e) {
+      setEstado("✕ " + e.message);
+    }
+    setOcupado(false);
+  };
+
+  const agregar = async () => {
+    if (!nueva.falla.trim()) return setEstado("Escribí la falla o el síntoma");
+    setOcupado(true);
+    let f = { id: "f" + Date.now(), falla: nueva.falla.trim(), causas: "", solucion: nueva.solucion.trim(), origen: "propia", fecha: new Date().toISOString(), notas: [] };
+    if (foto) {
+      setEstado("Subiendo foto…");
+      f.foto = await procesarFoto(foto, `${equipo.nombre} - falla - ${f.falla.slice(0, 40)}`).catch(() => null);
+    }
+    onUpdate({ fallas: [f, ...fallas] });
+    setNueva({ falla: "", solucion: "" });
+    setFoto(null);
+    setEstado("✓ Falla guardada");
+    setOcupado(false);
+  };
+
+  const cambiar = (id, patch) => onUpdate({ fallas: fallas.map((f) => (f.id === id ? { ...f, ...patch } : f)) });
+
+  const t = filtro.trim().toLowerCase();
+  const lista = t ? fallas.filter((f) => [f.falla, f.causas, f.solucion, ...(f.notas || []).map((n) => n.texto)].join(" ").toLowerCase().includes(t)) : fallas;
+
+  return (
+    <div>
+      <div className="panel-sub mt0">
+        <div className="section-title"><h4>Registrar falla y reparación</h4></div>
+        <input className="field" placeholder="Falla / síntoma / código de error (ej: Err 12 NIBP)" value={nueva.falla} onChange={(e) => setNueva({ ...nueva, falla: e.target.value })} />
+        <textarea className="field" rows="3" placeholder="Cómo se reparó (opcional)" value={nueva.solucion} onChange={(e) => setNueva({ ...nueva, solucion: e.target.value })} />
+        <div className="row gap wrap mt">
+          <FotoInput label={foto ? "📷 Foto lista ✓" : "📷 Agregar foto"} onFoto={setFoto} disabled={ocupado} />
+          <button className="btn primary" onClick={agregar} disabled={ocupado}>Guardar falla</button>
+        </div>
+      </div>
+
+      <div className="row gap wrap mt">
+        <button className="btn" onClick={buscar} disabled={ocupado}>{fallas.length ? "Buscar más fallas comunes" : "Buscar fallas comunes"}</button>
+        {fallas.length > 4 && <input className="field grow mt0" placeholder="Filtrar fallas…" value={filtro} onChange={(e) => setFiltro(e.target.value)} />}
+      </div>
+      {estado && <div className="small estado">{ocupado && <span className="spinner" />} {estado}</div>}
+
+      {fallas.length === 0 && !ocupado && <p className="muted">Todavía no hay fallas. Buscalas automáticamente (del manual y de foros) o registrá las tuyas.</p>}
+      <div className="mt">
+        {lista.map((f) => (
+          <div className="falla" key={f.id}>
+            <button className="falla-head" onClick={() => setAbierta(abierta === f.id ? null : f.id)}>
+              <span className="grow">{f.falla}</span>
+              <span className={"tag " + (f.origen === "propia" ? "tag-ok" : "")}>{ORIGEN_FALLA[f.origen] || f.origen}{f.pagina ? " · pág. " + f.pagina : ""}</span>
+              {(f.notas || []).length > 0 && <span className="tag tag-ok">+{f.notas.length}</span>}
+            </button>
+            {abierta === f.id && (
+              <div className="falla-body">
+                {f.foto && f.foto.thumb && (
+                  <a href={f.foto.driveLink || f.foto.thumb} target="_blank" rel="noreferrer"><img className="foto-mini" src={f.foto.thumb} alt="" /></a>
+                )}
+                {f.causas && <p><b>Causas:</b> {f.causas}</p>}
+                {f.solucion && <p className="pre"><b>Reparación:</b> {f.solucion}</p>}
+                {(f.notas || []).map((n, i) => (
+                  <div className="nota" key={i}>
+                    <div className="small muted">{new Date(n.fecha).toLocaleDateString()} · reparación registrada</div>
+                    <div className="pre">{n.texto}</div>
+                    {n.foto && n.foto.thumb && (
+                      <a href={n.foto.driveLink || n.foto.thumb} target="_blank" rel="noreferrer"><img className="foto-mini" src={n.foto.thumb} alt="" /></a>
+                    )}
+                  </div>
+                ))}
+                <InlineAdd
+                  placeholder="Agregar otra forma de reparación / nota…"
+                  onAdd={(texto) => cambiar(f.id, { notas: [...(f.notas || []), { texto, fecha: new Date().toISOString() }] })}
+                />
+                <div className="row gap mt">
+                  <FotoInput
+                    label="📷 Foto a esta falla"
+                    onFoto={async (file) => {
+                      setEstado("Subiendo foto…");
+                      const foto = await procesarFoto(file, `${equipo.nombre} - falla - ${f.falla.slice(0, 40)}`).catch(() => null);
+                      if (foto) cambiar(f.id, { notas: [...(f.notas || []), { texto: "Foto", fecha: new Date().toISOString(), foto }] });
+                      setEstado(foto ? "✓ Foto agregada" + (foto.aviso ? " (" + foto.aviso + ")" : "") : "✕ No se pudo procesar la foto");
+                    }}
+                  />
+                  <button className="btn small danger-outline" onClick={() => confirm("¿Borrar esta falla?") && onUpdate({ fallas: fallas.filter((x) => x.id !== f.id) })}>Borrar</button>
+                </div>
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+      {(equipo.fuentesFallas || []).length > 0 && (
+        <div className="small muted mt">
+          Fuentes web: {equipo.fuentesFallas.map((s, i) => <span key={i}>{i > 0 && ", "}<a href={s.url} target="_blank" rel="noreferrer">{s.titulo}</a></span>)}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TabArchivos({ equipo, onUpdate }) {
+  const archivos = equipo.archivos || [];
+  const [desc, setDesc] = useState("");
+  const [estado, setEstado] = useState("");
+  const [ocupado, setOcupado] = useState(false);
+  const fileRef = useRef(null);
+
+  const guardar = (a) => onUpdate({ archivos: [{ ...a, descripcion: desc.trim(), fecha: new Date().toISOString() }, ...archivos] });
+
+  const subirFoto = async (file) => {
+    setOcupado(true);
+    setEstado("Subiendo foto…");
+    try {
+      const f = await procesarFoto(file, `${equipo.nombre} - foto - ${desc || Date.now()}`);
+      guardar({ tipo: "foto", nombre: desc || "Foto", ...f });
+      setDesc("");
+      setEstado(f.aviso ? "⚠ " + f.aviso : "✓ Foto guardada en Drive");
+    } catch (e) {
+      setEstado("✕ " + e.message);
+    }
+    setOcupado(false);
+  };
+
+  const subirArchivo = async (file) => {
+    if (!file) return;
+    if (file.type.startsWith("image/")) return subirFoto(file);
+    setOcupado(true);
+    setEstado("Subiendo " + file.name + "…");
+    try {
+      const d = await subirADrive(file, nombreSeguro(`${equipo.nombre} - ${file.name}`));
+      guardar({ tipo: "archivo", nombre: file.name, mime: file.type, tamano: file.size, ...d });
+      setDesc("");
+      setEstado("✓ Guardado en Drive" + (file.type === "application/pdf" ? " · también se usa en las Consultas" : ""));
+    } catch (e) {
+      setEstado("✕ " + e.message);
+    }
+    setOcupado(false);
+    if (fileRef.current) fileRef.current.value = "";
+  };
+
+  const fotos = archivos.filter((a) => a.tipo === "foto");
+  const otros = archivos.filter((a) => a.tipo !== "foto");
+  const quitar = (a) => confirm("¿Quitar de la ficha? (si está en Drive, queda ahí)") && onUpdate({ archivos: archivos.filter((x) => x !== a) });
+
+  return (
+    <div>
+      <div className="panel-sub mt0">
+        <div className="section-title"><h4>Subir foto o archivo</h4></div>
+        <p className="small muted">Fotos de placas, etiquetas, fallas, boletines, planillas, PDFs que no están en la app… Todo queda en la carpeta de Drive del equipo.</p>
+        <input className="field" placeholder="Descripción (opcional): ej. placa principal, etiqueta de serie…" value={desc} onChange={(e) => setDesc(e.target.value)} />
+        <div className="row gap wrap mt">
+          <FotoInput label="📷 Sacar / subir foto" onFoto={subirFoto} disabled={ocupado} />
+          <label className={"btn" + (ocupado ? " disabled" : "")}>
+            📎 Subir archivo
+            <input ref={fileRef} type="file" hidden disabled={ocupado} onChange={(e) => subirArchivo(e.target.files[0])} />
+          </label>
+        </div>
+        {estado && <div className="small estado">{ocupado && <span className="spinner" />} {estado}</div>}
+      </div>
+
+      {archivos.length === 0 && <p className="muted mt">Todavía no hay fotos ni archivos.</p>}
+      {fotos.length > 0 && (
+        <div className="foto-grid mt">
+          {fotos.map((a, i) => (
+            <div className="foto-card" key={i}>
+              <a href={a.driveLink || a.thumb} target="_blank" rel="noreferrer"><img src={a.thumb} alt={a.nombre} /></a>
+              <div className="row">
+                <span className="small grow">{a.descripcion || a.nombre}</span>
+                <button className="icon-btn" title="Quitar" onClick={() => quitar(a)}>×</button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+      <div className="mt">
+        {otros.map((a, i) => (
+          <div className="link-item" key={i}>
+            <div className="grow">
+              <a href={a.driveLink} target="_blank" rel="noreferrer">{a.nombre}</a>
+              <div className="small muted">{a.descripcion}{a.tamano ? " · " + (a.tamano / 1048576).toFixed(1) + " MB" : ""}</div>
+            </div>
+            <button className="icon-btn" title="Quitar" onClick={() => quitar(a)}>×</button>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function TabConsulta({ equipo }) {
   const enDrive = (equipo.manuales || []).filter((m) => m.driveId).length;
   const [mensajes, setMensajes] = useState([
@@ -578,7 +842,16 @@ function TabConsulta({ equipo }) {
     setCargando(true);
     try {
       const r = await api("consultar", {
-        equipo: { nombre: equipo.nombre, marca: equipo.marca, modelo: equipo.modelo, manuales: equipo.manuales },
+        equipo: {
+          nombre: equipo.nombre,
+          marca: equipo.marca,
+          modelo: equipo.modelo,
+          manuales: [
+            ...(equipo.manuales || []),
+            ...(equipo.archivos || []).filter((a) => a.driveId && a.mime === "application/pdf").map((a) => ({ tipo: "otro", titulo: a.descripcion || a.nombre, driveId: a.driveId, driveLink: a.driveLink })),
+          ],
+          fallas: (equipo.fallas || []).map((f) => ({ falla: f.falla, solucion: f.solucion, origen: f.origen, notas: (f.notas || []).filter((n) => n.texto !== "Foto").map((n) => ({ texto: n.texto })) })),
+        },
         pregunta,
         historial,
       });
@@ -623,8 +896,10 @@ function FichaEquipo({ equipo, todosLosEquipos, onVolver, onUpdate, onBorrar }) 
   const alertas = useMemo(() => detectarRepuestosCompartidos(equipo, todosLosEquipos), [equipo, todosLosEquipos]);
   const tabs = [
     { id: "consulta", label: "Consulta" },
+    { id: "fallas", label: `Fallas (${(equipo.fallas || []).length})` },
     { id: "manuales", label: `Manuales (${(equipo.manuales || []).length})` },
     { id: "videos", label: `Videos (${(equipo.videos || []).length})` },
+    { id: "archivos", label: `Fotos y archivos (${(equipo.archivos || []).length})` },
     { id: "insumos", label: "Insumos" },
     { id: "repuestos", label: "Repuestos" },
   ];
@@ -645,6 +920,8 @@ function FichaEquipo({ equipo, todosLosEquipos, onVolver, onUpdate, onBorrar }) 
         ))}
       </div>
       {tab === "consulta" && <TabConsulta key={equipo.id} equipo={equipo} />}
+      {tab === "fallas" && <TabFallas equipo={equipo} onUpdate={onUpdate} />}
+      {tab === "archivos" && <TabArchivos equipo={equipo} onUpdate={onUpdate} />}
       {tab === "manuales" && <TabManuales equipo={equipo} onUpdate={onUpdate} />}
       {tab === "videos" && <TabVideos equipo={equipo} onUpdate={onUpdate} />}
       {tab === "insumos" && (
@@ -724,6 +1001,75 @@ function Estado({ ok, label, detalle }) {
   );
 }
 
+function Copiar({ texto }) {
+  const [ok, setOk] = useState(false);
+  return (
+    <span className="copiar">
+      <code>{texto}</code>
+      <button
+        className="btn small"
+        onClick={() => {
+          navigator.clipboard && navigator.clipboard.writeText(texto).then(() => {
+            setOk(true);
+            setTimeout(() => setOk(false), 1500);
+          });
+        }}
+      >
+        {ok ? "✓" : "Copiar"}
+      </button>
+    </span>
+  );
+}
+
+const L = ({ href, children }) => <a href={href} target="_blank" rel="noreferrer">{children} ↗</a>;
+
+function GuiaApis({ estado }) {
+  const redirect = location.origin + "/api/drive-auth";
+  const e = estado && !estado.error ? estado : {};
+  const Paso = ({ ok, titulo, children }) => (
+    <details className="paso" open={!ok}>
+      <summary><span className={ok ? "check" : "fail"}>{ok ? "✓" : "•"}</span> {titulo}</summary>
+      <div className="paso-body">{children}</div>
+    </details>
+  );
+  return (
+    <div className="panel-sub">
+      <div className="section-title"><h4>Guía rápida: conseguir las claves</h4></div>
+      <p className="small muted">Cada clave va en Vercel → <L href="https://vercel.com/dashboard">tu proyecto</L> → Settings → Environment Variables. Después: Deployments → ⋯ → Redeploy.</p>
+
+      <Paso ok={e.gemini} titulo="1. Gemini (obligatoria, gratis)">
+        <ol>
+          <li>Entrá a <L href="https://aistudio.google.com/apikey">Google AI Studio → API keys</L> y tocá “Create API key”.</li>
+          <li>Copiala a Vercel como <code>GEMINI_API_KEY</code> (o pegala abajo para probar ya).</li>
+        </ol>
+      </Paso>
+
+      <Paso ok={e.drive} titulo="2. Google Drive (para alojar manuales, fotos y la biblioteca)">
+        <ol>
+          <li>Creá un proyecto: <L href="https://console.cloud.google.com/projectcreate">Nuevo proyecto de Google Cloud</L>.</li>
+          <li>Habilitá la API: <L href="https://console.cloud.google.com/apis/library/drive.googleapis.com">Google Drive API → Habilitar</L>.</li>
+          <li>Pantalla de consentimiento: <L href="https://console.cloud.google.com/auth/overview">Google Auth Platform</L> → Comenzar → tipo <b>Externo</b>. Luego en <L href="https://console.cloud.google.com/auth/audience">Público</L> tocá <b>Publicar app</b> (si queda en prueba, vence a los 7 días).</li>
+          <li>Credencial: <L href="https://console.cloud.google.com/auth/clients/create">Crear cliente OAuth</L> → tipo <b>Aplicación web</b> → en “URI de redireccionamiento autorizados” pegá: <Copiar texto={redirect} /></li>
+          <li>Copiá el ID y el secreto a Vercel como <code>GOOGLE_CLIENT_ID</code> y <code>GOOGLE_CLIENT_SECRET</code> y redeployá.</li>
+          <li>{e.driveCliente ? <a className="btn primary small" href="/api/drive-auth">Conectar Google Drive</a> : <b>Conectar Google Drive</b>} → aceptás → copiás el token que aparece a <code>GOOGLE_REFRESH_TOKEN</code> en Vercel y redeployás.</li>
+        </ol>
+      </Paso>
+
+      <Paso ok={e.youtube} titulo="3. YouTube (opcional, mejores videos)">
+        <ol>
+          <li>En el mismo proyecto: <L href="https://console.cloud.google.com/apis/library/youtube.googleapis.com">YouTube Data API v3 → Habilitar</L>.</li>
+          <li><L href="https://console.cloud.google.com/apis/credentials">Credenciales</L> → Crear credenciales → <b>Clave de API</b>.</li>
+          <li>Copiala a Vercel como <code>YOUTUBE_API_KEY</code>.</li>
+        </ol>
+      </Paso>
+
+      <Paso ok={e.pinServidor} titulo="4. PIN común (recomendado)">
+        <p className="small">Agregá en Vercel <code>ADMIN_PIN</code> con el PIN que quieras: así todos entran a Configuración con el mismo PIN.</p>
+      </Paso>
+    </div>
+  );
+}
+
 function ModalConfig({ onClose, onGuardado }) {
   const [cfg, setCfg] = useState(() => leerLS(LS_CFG, {}));
   const [estado, setEstado] = useState(null);
@@ -769,6 +1115,8 @@ function ModalConfig({ onClose, onGuardado }) {
             <a className="btn primary mt" href="/api/drive-auth">Conectar Google Drive</a>
           )}
         </div>
+
+        <GuiaApis estado={estado} />
 
         <div className="panel-sub">
           <div className="section-title"><h4>Claves en este navegador</h4></div>
@@ -837,6 +1185,7 @@ function App() {
         ...(e.manuales || []).map((m) => m.titulo),
         ...(e.insumos || []).map((i) => i.nombre + " " + (i.codigo || "")),
         ...(e.repuestos || []).map((r) => r.nombre + " " + (r.codigo || "")),
+        ...(e.fallas || []).map((f) => f.falla),
       ]
         .filter(Boolean)
         .join(" ")
@@ -877,7 +1226,7 @@ function App() {
       {!equipoActual && (
         <React.Fragment>
           <form className="search-box" onSubmit={(e) => { e.preventDefault(); if (term && !existeExacto) setAgregando(busqueda.trim()); }}>
-            <input placeholder="Nombre del equipo o manual (ej: Mindray iPM 10)…" value={busqueda} onChange={(e) => setBusqueda(e.target.value)} />
+            <input placeholder="Buscar equipo, falla o repuesto — o escribí un equipo nuevo (ej: Mindray iPM 10)" value={busqueda} onChange={(e) => setBusqueda(e.target.value)} />
             <span className="icon"><Icono d={IC.search} /></span>
           </form>
 
@@ -904,6 +1253,7 @@ function App() {
                     <div className="meta">{[e.marca, e.modelo].filter(Boolean).join(" ") || e.tipoEquipo}</div>
                     <div className="badge-row">
                       <span className={`badge ${enD ? "ok" : "warn"}`}>{enD} manuales en Drive</span>
+                      <span className="badge">{(e.fallas || []).length} fallas</span>
                       <span className="badge">{(e.videos || []).length} videos</span>
                       <span className="badge">{(e.insumos || []).length} insumos</span>
                       <span className="badge">{(e.repuestos || []).length} repuestos</span>
