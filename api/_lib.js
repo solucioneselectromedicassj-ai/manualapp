@@ -174,10 +174,9 @@ function requireGemini(cfg) {
   if (!cfg.geminiKey) throw fail(400, "Falta la clave de Gemini (GEMINI_API_KEY). Cargala en Configuracion.");
 }
 
-async function gemini(cfg, body, ms = 50000) {
-  requireGemini(cfg);
+async function geminiLlamada(cfg, model, body, ms) {
   const r = await fetchTimeout(
-    `${GEMINI_BASE}/v1beta/models/${cfg.geminiModel}:generateContent`,
+    `${GEMINI_BASE}/v1beta/models/${model}:generateContent`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json", "x-goog-api-key": cfg.geminiKey },
@@ -193,6 +192,124 @@ async function gemini(cfg, body, ms = 50000) {
     .map((c) => c.web)
     .filter(Boolean);
   return { text, chunks };
+}
+
+// Si el modelo esta saturado (503/500) reintenta con uno mas liviano.
+async function gemini(cfg, body, ms = 50000) {
+  requireGemini(cfg);
+  try {
+    return await geminiLlamada(cfg, cfg.geminiModel, body, ms);
+  } catch (e) {
+    if (e.status >= 500 && cfg.geminiModel !== "gemini-flash-lite-latest") {
+      return geminiLlamada(cfg, "gemini-flash-lite-latest", body, ms);
+    }
+    throw e;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// BUSQUEDA WEB
+// ---------------------------------------------------------------------------
+// La busqueda de Google dentro de Gemini ("grounding") no tiene cupo en el
+// plan gratis. Si da 429 se busca en DuckDuckGo / Bing y Gemini lee las
+// paginas encontradas con url_context (que si es gratis).
+let sinGrounding = 0; // timestamp hasta el que no se reintenta google_search
+
+const decodeHtml = (s) =>
+  s.replace(/<[^>]+>/g, "").replace(/&amp;/g, "&").replace(/&quot;/g, '"').replace(/&#x27;|&#39;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&nbsp;/g, " ").trim();
+
+async function buscarDDG(q) {
+  const r = await fetchTimeout(
+    "https://html.duckduckgo.com/html/",
+    {
+      method: "POST",
+      headers: { "User-Agent": UA, "Content-Type": "application/x-www-form-urlencoded", Accept: "text/html" },
+      body: new URLSearchParams({ q, kl: "wt-wt" }).toString(),
+    },
+    12000
+  );
+  const html = await r.text();
+  const out = [];
+  const re = /class="result__a"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>[\s\S]*?(?:class="result__snippet"[^>]*>([\s\S]*?)<\/a>)?/g;
+  let m;
+  while ((m = re.exec(html))) {
+    let url = m[1].replace(/&amp;/g, "&");
+    const u = url.match(/[?&]uddg=([^&]+)/);
+    if (u) url = decodeURIComponent(u[1]);
+    if (url.startsWith("//")) url = "https:" + url;
+    if (/^https?:\/\//.test(url) && !/duckduckgo\.com\/y\.js/.test(url)) out.push({ titulo: decodeHtml(m[2]), url, snippet: decodeHtml(m[3] || "") });
+  }
+  return out;
+}
+
+async function buscarBing(q) {
+  const r = await fetchTimeout(`https://www.bing.com/search?q=${encodeURIComponent(q)}&setlang=es`, { headers: { "User-Agent": UA, Accept: "text/html" } }, 12000);
+  const html = await r.text();
+  const out = [];
+  const re = /<li class="b_algo"[\s\S]*?<h2[^>]*><a[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>[\s\S]*?(?:<p[^>]*>([\s\S]*?)<\/p>)?/g;
+  let m;
+  while ((m = re.exec(html))) {
+    let url = m[1].replace(/&amp;/g, "&");
+    const u = url.match(/[?&]u=a1([^&]+)/);
+    if (/bing\.com\/ck\/a/.test(url) && u) {
+      try {
+        url = Buffer.from(u[1].replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8");
+      } catch (e) {}
+    }
+    if (/^https?:\/\//.test(url)) out.push({ titulo: decodeHtml(m[2]), url, snippet: decodeHtml(m[3] || "") });
+  }
+  return out;
+}
+
+async function buscarWeb(q) {
+  try {
+    const r = await buscarDDG(q);
+    if (r.length) return r;
+  } catch (e) {}
+  try {
+    return await buscarBing(q);
+  } catch (e) {
+    return [];
+  }
+}
+
+// Llama a Gemini con busqueda web. Primero intenta google_search; si no hay
+// cupo, busca las `consultas` en DDG/Bing y le pasa los resultados a Gemini
+// (con url_context para que pueda abrir las paginas).
+// Devuelve {text, chunks:[{uri,title}], resultados:[{titulo,url,snippet}]}.
+async function geminiConBusqueda(cfg, { contents, systemInstruction, consultas, generationConfig = { temperature: 0.2 } }) {
+  if (Date.now() > sinGrounding) {
+    try {
+      const r = await gemini(cfg, { contents, systemInstruction, tools: [{ google_search: {} }], generationConfig });
+      return { ...r, resultados: [] };
+    } catch (e) {
+      if (e.status !== 429 && e.status !== 403) throw e;
+      sinGrounding = Date.now() + 10 * 60 * 1000;
+    }
+  }
+  const listas = await Promise.all(consultas.map(buscarWeb));
+  const vistos = new Set();
+  const resultados = [];
+  listas.flat().forEach((x) => {
+    if (!vistos.has(x.url)) {
+      vistos.add(x.url);
+      resultados.push(x);
+    }
+  });
+  const top = resultados.slice(0, 18);
+  const contexto = top.length
+    ? "Resultados de busqueda web (podes abrir estos links para leerlos):\n" + top.map((x, i) => `${i + 1}. ${x.titulo}\n   ${x.url}\n   ${x.snippet}`).join("\n")
+    : "(La busqueda web no devolvio resultados: respondé con tu conocimiento y aclaralo.)";
+  const ultimo = contents[contents.length - 1];
+  const conCtx = [...contents.slice(0, -1), { ...ultimo, parts: [{ text: contexto }, ...ultimo.parts] }];
+  let r;
+  try {
+    r = await gemini(cfg, { contents: conCtx, systemInstruction, tools: [{ url_context: {} }], generationConfig });
+  } catch (e) {
+    if (e.status !== 429 && e.status !== 400) throw e;
+    r = await gemini(cfg, { contents: conCtx, systemInstruction, generationConfig });
+  }
+  return { text: r.text, chunks: top.slice(0, 5).map((x) => ({ uri: x.url, title: x.titulo })), resultados: top };
 }
 
 // Extrae el primer bloque JSON de un texto (Gemini con google_search no
@@ -252,6 +369,26 @@ async function geminiUriForDrive(cfg, token, driveId, titulo) {
   return uri;
 }
 
+// Igual que geminiUriForDrive pero para un manual {driveId?, url?, titulo}:
+// si todavia no esta en Drive, baja el PDF desde su link original.
+const urlCache = {};
+async function geminiUriForManual(cfg, m) {
+  if (m.driveId) {
+    const token = await driveToken(cfg);
+    return geminiUriForDrive(cfg, token, m.driveId, m.titulo);
+  }
+  if (!m.url) throw fail(400, "manual sin archivo");
+  const c = urlCache[m.url];
+  if (c && c.exp > Date.now()) return c.uri;
+  const r = await fetchTimeout(m.url, { headers: { "User-Agent": UA } }, 25000);
+  if (!r.ok) throw fail(502, "No se pudo bajar el PDF (" + r.status + ")");
+  const buf = Buffer.from(await r.arrayBuffer());
+  if (!buf.slice(0, 1024).toString("latin1").includes("%PDF")) throw fail(502, "El link ya no devuelve un PDF");
+  const uri = await geminiUploadFile(cfg, buf, "application/pdf", m.titulo || "manual");
+  urlCache[m.url] = { uri, exp: Date.now() + 46 * 3600 * 1000 };
+  return uri;
+}
+
 module.exports = {
   UA,
   getCfg,
@@ -267,6 +404,8 @@ module.exports = {
   driveDownload,
   driveMeta,
   gemini,
+  geminiConBusqueda,
   parseJson,
   geminiUriForDrive,
+  geminiUriForManual,
 };

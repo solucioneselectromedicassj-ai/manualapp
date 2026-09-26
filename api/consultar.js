@@ -1,7 +1,7 @@
 // POST {equipo:{nombre,marca,modelo,manuales}, pregunta, historial}
 // Responde usando los PDFs guardados en Drive. Si el equipo no tiene
 // manuales en Drive, responde con busqueda web y lo aclara.
-const { handler, send, fail, gemini, driveToken, geminiUriForDrive } = require("./_lib");
+const { handler, send, fail, gemini, geminiConBusqueda, geminiUriForManual } = require("./_lib");
 
 const ORDEN = { tecnico: 0, usuario: 1, despiece: 2 };
 
@@ -17,7 +17,7 @@ module.exports = handler(async (req, res, cfg) => {
     .join("\n");
   const extra = propias ? `\n\nExperiencia registrada por el equipo tecnico (usala y citala como "registro propio"):\n${propias}` : "";
   const manuales = (equipo.manuales || [])
-    .filter((m) => m.driveId)
+    .filter((m) => m.driveId || /\.pdf|^https?:/i.test(m.url || ""))
     .sort((a, b) => (ORDEN[a.tipo] ?? 9) - (ORDEN[b.tipo] ?? 9))
     .slice(0, 4);
 
@@ -26,14 +26,22 @@ module.exports = handler(async (req, res, cfg) => {
     parts: [{ text: String(m.texto || "") }],
   }));
 
+  const partes = [];
+  const usados = [];
   if (manuales.length) {
-    const token = await driveToken(cfg);
-    const partes = [];
     for (const m of manuales) {
-      const uri = await geminiUriForDrive(cfg, token, m.driveId, m.titulo);
+      let uri;
+      try {
+        uri = await geminiUriForManual(cfg, m);
+      } catch (e) {
+        continue; // link caido: se sigue con los demas
+      }
+      usados.push(m);
       partes.push({ text: `Documento: "${m.titulo}" (${m.tipo || "manual"})` });
       partes.push({ file_data: { mime_type: "application/pdf", file_uri: uri } });
     }
+  }
+  if (usados.length) {
     partes.push({ text: pregunta });
     const { text } = await gemini(cfg, {
       systemInstruction: {
@@ -49,17 +57,16 @@ module.exports = handler(async (req, res, cfg) => {
     return send(res, 200, {
       respuesta: text,
       modo: "manual",
-      fuentes: manuales.map((m) => ({ titulo: m.titulo, url: m.driveLink || m.url })),
+      fuentes: usados.map((m) => ({ titulo: m.titulo, url: m.driveLink || m.url })),
     });
   }
 
-  const { text, chunks } = await gemini(cfg, {
+  const { text, chunks } = await geminiConBusqueda(cfg, {
+    consultas: [`${nombreEq} ${pregunta}`.slice(0, 200)],
     systemInstruction: {
       parts: [{ text: `Sos un asistente tecnico de ingenieria biomedica para el equipo ${nombreEq}. Respondé en español. Aclaralo si la informacion no proviene del manual oficial.${extra}` }],
     },
     contents: [...previos, { role: "user", parts: [{ text: pregunta }] }],
-    tools: [{ google_search: {} }],
-    generationConfig: { temperature: 0.2 },
   });
   send(res, 200, {
     respuesta: text,

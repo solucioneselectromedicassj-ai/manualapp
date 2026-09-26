@@ -1,7 +1,7 @@
 // POST {equipo:{nombre,marca,modelo}, driveId?, titulo?}
 // Fallas mas comunes y como repararlas: del manual (seccion de solucion de
 // problemas / codigos de error) y de la web (foros, videos, service notes).
-const { handler, send, fail, gemini, parseJson, driveToken, geminiUriForDrive } = require("./_lib");
+const { handler, send, fail, gemini, geminiConBusqueda, parseJson, geminiUriForManual } = require("./_lib");
 
 const FORMATO = `Respondé solo JSON: {"fallas":[{"falla":"sintoma o mensaje de error","causas":"causas probables","solucion":"pasos de reparacion concretos","pagina":0}]}. Entre 5 y 15 fallas, las mas frecuentes primero, en español.`;
 
@@ -18,24 +18,22 @@ function limpiar(d, fuente) {
 }
 
 module.exports = handler(async (req, res, cfg) => {
-  const { equipo = {}, driveId, titulo = "" } = req.body || {};
+  const { equipo = {}, driveId, url, titulo = "" } = req.body || {};
   const nombre = [equipo.nombre, equipo.marca, equipo.modelo].filter(Boolean).join(" ");
   if (!nombre) throw fail(400, "falta equipo");
 
-  const web = gemini(cfg, {
+  const web = geminiConBusqueda(cfg, {
+    consultas: [`${nombre} troubleshooting error codes`, `${nombre} common problems repair`, `${nombre} falla reparacion`],
     contents: [
       {
         role: "user",
         parts: [{ text: `Buscá en internet (foros de biomedicos, service notes, videos, grupos tecnicos) las fallas mas comunes del equipo medico "${nombre}" y como se reparan. ${FORMATO}` }],
       },
     ],
-    tools: [{ google_search: {} }],
-    generationConfig: { temperature: 0.2 },
   }).then((r) => ({ fallas: limpiar(parseJson(r.text), "web"), fuentes: r.chunks.slice(0, 5).map((c) => ({ titulo: c.title, url: c.uri })) }));
 
-  const manual = driveId
-    ? driveToken(cfg)
-        .then((token) => geminiUriForDrive(cfg, token, driveId, titulo))
+  const manual = driveId || url
+    ? geminiUriForManual(cfg, { driveId, url, titulo })
         .then((uri) =>
           gemini(cfg, {
             contents: [
