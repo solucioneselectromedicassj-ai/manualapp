@@ -22,20 +22,26 @@ En Vercel → proyecto → **Settings → Environment Variables**:
 
 | Variable | Obligatoria | De dónde sale |
 |---|---|---|
-| `GEMINI_API_KEY` | sí | https://aistudio.google.com/apikey |
+| `GEMINI_API_KEY` | sí | [AI Studio → API keys](https://aistudio.google.com/apikey) |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | sí (Drive) | ver abajo |
 | `GOOGLE_REFRESH_TOKEN` | sí (Drive) | lo genera la app con “Conectar Google Drive” |
 | `ADMIN_PIN` | recomendado | PIN para entrar a Configuración (si no está, cada dispositivo crea el suyo) |
-| `YOUTUBE_API_KEY` | no | Google Cloud → habilitar “YouTube Data API v3” → Credenciales → Clave de API |
+| `YOUTUBE_API_KEY` | no | [Habilitar YouTube Data API v3](https://console.cloud.google.com/apis/library/youtube.googleapis.com) → [Credenciales](https://console.cloud.google.com/apis/credentials) → Clave de API |
 | `DRIVE_FOLDER_ID` | no | si no se pone, la app crea la carpeta “Manuales SEM” |
 | `GEMINI_MODEL` | no | por defecto `gemini-flash-latest` |
 
 ### Google Drive (OAuth)
-1. https://console.cloud.google.com → crear proyecto → **APIs y servicios → Biblioteca** → habilitar **Google Drive API**.
-2. **Pantalla de consentimiento de OAuth**: tipo *Externo*, agregá tu mail como usuario de prueba y luego **Publicar la app** (en modo “prueba” el acceso vence a los 7 días). El permiso que se pide es `drive.file` (solo los archivos que crea la app), no requiere verificación de Google.
-3. **Credenciales → Crear credenciales → ID de cliente OAuth → Aplicación web**. En *URI de redireccionamiento autorizados* poné `https://manualapp-one.vercel.app/api/drive-auth`.
+1. [Crear proyecto](https://console.cloud.google.com/projectcreate) → [habilitar Google Drive API](https://console.cloud.google.com/apis/library/drive.googleapis.com).
+2. [Pantalla de consentimiento (Google Auth Platform)](https://console.cloud.google.com/auth/overview): tipo *Externo*, agregá tu mail como usuario de prueba y luego **Publicar la app** (en modo “prueba” el acceso vence a los 7 días). El permiso que se pide es `drive.file` (solo los archivos que crea la app), no requiere verificación de Google.
+3. [Crear cliente OAuth](https://console.cloud.google.com/auth/clients/create) → **Aplicación web**. En *URI de redireccionamiento autorizados* poné `https://manualapp-one.vercel.app/api/drive-auth`.
 4. Copiá el ID y el secreto a `GOOGLE_CLIENT_ID` y `GOOGLE_CLIENT_SECRET` en Vercel y redeployá.
 5. En la app: ⚙ Configuración → **Conectar Google Drive** → aceptás → copiás el token que muestra a `GOOGLE_REFRESH_TOKEN` en Vercel y redeployá (o “Guardar en este navegador” para probar ya).
+
+La misma guía con links está en la app: ⚙ Configuración → *Guía rápida*.
+
+## Fallas, fotos y archivos
+- **Fallas**: busca las fallas más comunes en el manual (troubleshooting) y en foros; podés registrar las tuyas con su reparación y foto, y sumar otras formas de reparar. Las consultas usan ese registro propio.
+- **Fotos y archivos**: fotos (se achican antes de subir) y cualquier archivo que no esté en la app, guardados en Drive. Los PDF subidos también se usan en las consultas.
 
 ## Instalar como app
 Botón **Instalar app** arriba (Android/Chrome/Edge). En iPhone: Compartir → “Agregar a pantalla de inicio”.

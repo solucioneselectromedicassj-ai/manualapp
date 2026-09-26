@@ -9,10 +9,17 @@ module.exports = handler(async (req, res, cfg) => {
   const { equipo = {}, pregunta = "", historial = [] } = req.body || {};
   if (!pregunta.trim()) throw fail(400, "falta pregunta");
   const nombreEq = [equipo.nombre, equipo.marca, equipo.modelo].filter(Boolean).join(" ");
+  // Experiencia propia del equipo tecnico: fallas y reparaciones cargadas a mano.
+  const propias = (equipo.fallas || [])
+    .filter((f) => f.origen === "propia" || (f.notas || []).length)
+    .slice(0, 30)
+    .map((f) => `- ${f.falla}: ${[f.solucion, ...(f.notas || []).map((n) => n.texto)].filter(Boolean).join(" / ")}`)
+    .join("\n");
+  const extra = propias ? `\n\nExperiencia registrada por el equipo tecnico (usala y citala como "registro propio"):\n${propias}` : "";
   const manuales = (equipo.manuales || [])
     .filter((m) => m.driveId)
     .sort((a, b) => (ORDEN[a.tipo] ?? 9) - (ORDEN[b.tipo] ?? 9))
-    .slice(0, 3);
+    .slice(0, 4);
 
   const previos = (Array.isArray(historial) ? historial : []).slice(-6).map((m) => ({
     role: m.rol === "user" ? "user" : "model",
@@ -32,7 +39,7 @@ module.exports = handler(async (req, res, cfg) => {
       systemInstruction: {
         parts: [
           {
-            text: `Sos un asistente tecnico de ingenieria biomedica para el equipo ${nombreEq}. Respondé en español, claro y paso a paso, basandote SOLO en los manuales adjuntos. Citá al final el documento y la pagina: (Fuente: <titulo>, pág. N). Si el manual no lo dice, decilo explicitamente y sugeri que buscar.`,
+            text: `Sos un asistente tecnico de ingenieria biomedica para el equipo ${nombreEq}. Respondé en español, claro y paso a paso, basandote SOLO en los manuales adjuntos. Citá al final el documento y la pagina: (Fuente: <titulo>, pág. N). Si el manual no lo dice, decilo explicitamente y sugeri que buscar.${extra}`,
           },
         ],
       },
@@ -48,7 +55,7 @@ module.exports = handler(async (req, res, cfg) => {
 
   const { text, chunks } = await gemini(cfg, {
     systemInstruction: {
-      parts: [{ text: `Sos un asistente tecnico de ingenieria biomedica para el equipo ${nombreEq}. Respondé en español. Aclaralo si la informacion no proviene del manual oficial.` }],
+      parts: [{ text: `Sos un asistente tecnico de ingenieria biomedica para el equipo ${nombreEq}. Respondé en español. Aclaralo si la informacion no proviene del manual oficial.${extra}` }],
     },
     contents: [...previos, { role: "user", parts: [{ text: pregunta }] }],
     tools: [{ google_search: {} }],
