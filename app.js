@@ -1,149 +1,112 @@
 const { useState, useEffect, useRef, useMemo } = React;
 
 // ---------------------------------------------------------------------------
-// CONFIG
+// CONFIG LOCAL (panel de Configuracion)
 // ---------------------------------------------------------------------------
-// Firebase config va acá. Las claves de Firebase web son públicas por diseño
-// (identifican el proyecto, no autorizan nada por sí solas) - la seguridad
-// real la dan las reglas de Firestore. NO poner acá las API keys de Gemini/
-// Grok/YouTube: esas quedan solo en las variables de entorno de Vercel y se
-// usan desde /api/*.js (server-side).
-const FIREBASE_CONFIG = {
-  apiKey: "TODO",
-  authDomain: "TODO.firebaseapp.com",
-  projectId: "TODO",
-  storageBucket: "TODO.appspot.com",
-  messagingSenderId: "TODO",
-  appId: "TODO",
-};
+// Las claves van preferentemente en las variables de entorno de Vercel. Lo que
+// se cargue en el panel queda solo en este navegador y viaja por headers a
+// /api/* (tiene prioridad sobre las de Vercel).
+const LS_CFG = "msem.cfg";
+const LS_EQUIPOS = "msem.equipos";
+const LS_PIN = "msem.pinHash";
 
-let db = null;
-try {
-  if (FIREBASE_CONFIG.projectId !== "TODO") {
-    firebase.initializeApp(FIREBASE_CONFIG);
-    db = firebase.firestore();
-  }
-} catch (e) {
-  console.warn("Firebase no configurado todavia:", e);
-}
-
-// ---------------------------------------------------------------------------
-// DATOS DE EJEMPLO (se usan si Firestore no está configurado, para poder
-// ver y probar la interfaz de entrada)
-// ---------------------------------------------------------------------------
-const MOCK_EQUIPOS = [
-  {
-    id: "mock-1",
-    nombre: "Monitor Multiparamétrico",
-    marca: "Mindray",
-    modelo: "PM-9000",
-    manuales: [
-      { tipo: "usuario", titulo: "Manual de usuario PM-9000", url: "https://example.com/manual-usuario.pdf", fuente: "sitio oficial Mindray" },
-      { tipo: "tecnico", titulo: "Manual técnico / service PM-9000", url: "https://example.com/manual-tecnico.pdf", fuente: "foro biomedica.org" },
-      { tipo: "despiece", titulo: "Diagrama de despiece PM-9000", url: "https://example.com/despiece.pdf", fuente: "foro biomedica.org" },
-    ],
-    videos: [
-      { titulo: "Calibración PM-9000 paso a paso", url: "https://youtube.com/watch?v=xxxx" },
-      { titulo: "Reparación módulo SpO2 Mindray", url: "https://youtube.com/watch?v=yyyy" },
-    ],
-    insumos: [
-      { nombre: "Sensor SpO2 adulto reusable", origen: "auto" },
-      { nombre: "Cable ECG 5 derivaciones", origen: "auto" },
-      { nombre: "Manguito NIBP adulto", origen: "manual" },
-    ],
-    repuestos: [
-      { nombre: "Módulo NIBP", codigo: "115-018012-00", origen: "auto", compartidoCon: [] },
-      { nombre: "Batería de litio 11.1V", codigo: "022-000044-00", origen: "auto", compartidoCon: ["Philips MP20", "Edan iM8"] },
-    ],
-    imagenes: [],
-  },
-];
-
-// ---------------------------------------------------------------------------
-// LLAMADAS A LA API (funciones serverless en /api)
-// ---------------------------------------------------------------------------
-async function apiAgregarEquipo(nombre, onProgress) {
-  // El backend real hace streaming de progreso; acá hacemos fetch simple y
-  // simulamos progreso si no hay conexión real. Ver api/agregar-equipo.js
+function leerLS(k, def) {
   try {
-    const res = await fetch("/api/agregar-equipo", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ nombre }),
-    });
-    if (!res.ok) throw new Error("Fallo la busqueda automatica");
-    return await res.json();
+    const v = localStorage.getItem(k);
+    return v ? JSON.parse(v) : def;
   } catch (e) {
-    // Fallback local para poder probar la UI sin backend desplegado todavia
-    console.warn("API no disponible, usando resultado simulado:", e.message);
-    await new Promise((r) => setTimeout(r, 1200));
-    return {
-      id: "eq-" + Date.now(),
-      nombre,
-      marca: "",
-      modelo: "",
-      manuales: [],
-      videos: [],
-      insumos: [],
-      repuestos: [],
-      imagenes: [],
-    };
+    return def;
   }
+}
+function guardarLS(k, v) {
+  try {
+    localStorage.setItem(k, JSON.stringify(v));
+  } catch (e) {}
 }
 
-async function apiConsultar(equipoId, pregunta) {
-  try {
-    const res = await fetch("/api/consultar", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ equipoId, pregunta }),
-    });
-    if (!res.ok) throw new Error("fallo consulta");
-    return await res.json();
-  } catch (e) {
-    return {
-      respuesta:
-        "No pude conectar con el servicio de consulta todavia (falta desplegar /api/consultar con la clave de Gemini). " +
-        "Cuando esté configurado, esta respuesta va a venir del manual del equipo con su cita de origen.",
-      fuentes: [],
-    };
-  }
+function headersCfg() {
+  const c = leerLS(LS_CFG, {});
+  const h = { "Content-Type": "application/json" };
+  if (c.geminiKey) h["x-gemini-key"] = c.geminiKey;
+  if (c.geminiModel) h["x-gemini-model"] = c.geminiModel;
+  if (c.youtubeKey) h["x-youtube-key"] = c.youtubeKey;
+  if (c.refreshToken) h["x-google-refresh-token"] = c.refreshToken;
+  if (c.folderId) h["x-drive-folder"] = c.folderId;
+  return h;
 }
+
+async function api(path, body, method) {
+  const res = await fetch("/api/" + path, {
+    method: method || (body ? "POST" : "GET"),
+    headers: headersCfg(),
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  let data = {};
+  try {
+    data = await res.json();
+  } catch (e) {
+    throw new Error(res.status === 404 ? "El backend /api no esta desplegado" : "Respuesta invalida del servidor (" + res.status + ")");
+  }
+  if (!res.ok) throw new Error(data.error || "Error " + res.status);
+  return data;
+}
+
+async function sha256(txt) {
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(txt));
+  return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+const TIPOS = { usuario: "Manual de usuario", tecnico: "Manual técnico", despiece: "Manual de despiece" };
 
 // ---------------------------------------------------------------------------
-// FIRESTORE HELPERS (se usan solo si db esta configurado)
+// BIBLIOTECA: equipos.json en Drive, con copia en este navegador
 // ---------------------------------------------------------------------------
 function useEquipos() {
-  const [equipos, setEquipos] = useState(MOCK_EQUIPOS);
-  const [loading, setLoading] = useState(!!db);
+  const [equipos, setEquipos] = useState(() => leerLS(LS_EQUIPOS, []));
+  const [enDrive, setEnDrive] = useState(false);
+  const [cargando, setCargando] = useState(true);
+
+  const recargar = async () => {
+    try {
+      const r = await api("equipos");
+      setEquipos(r.equipos);
+      guardarLS(LS_EQUIPOS, r.equipos);
+      setEnDrive(true);
+    } catch (e) {
+      setEnDrive(false);
+    }
+    setCargando(false);
+  };
 
   useEffect(() => {
-    if (!db) return;
-    const unsub = db.collection("equipos").onSnapshot((snap) => {
-      const list = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
-      setEquipos(list);
-      setLoading(false);
-    });
-    return unsub;
+    recargar();
   }, []);
 
-  const addEquipo = async (equipo) => {
-    if (db) {
-      const ref = await db.collection("equipos").add(equipo);
-      return { id: ref.id, ...equipo };
+  const guardar = async (equipo) => {
+    setEquipos((prev) => {
+      const next = prev.some((e) => e.id === equipo.id) ? prev.map((e) => (e.id === equipo.id ? equipo : e)) : [...prev, equipo];
+      guardarLS(LS_EQUIPOS, next);
+      return next;
+    });
+    if (enDrive) {
+      try {
+        await api("equipos", { equipo });
+      } catch (e) {
+        console.warn("No se guardo en Drive:", e.message);
+      }
     }
-    setEquipos((prev) => [...prev, equipo]);
-    return equipo;
   };
 
-  const updateEquipo = async (id, patch) => {
-    if (db) {
-      await db.collection("equipos").doc(id).update(patch);
-    }
-    setEquipos((prev) => prev.map((e) => (e.id === id ? { ...e, ...patch } : e)));
+  const borrar = async (id) => {
+    setEquipos((prev) => {
+      const next = prev.filter((e) => e.id !== id);
+      guardarLS(LS_EQUIPOS, next);
+      return next;
+    });
+    if (enDrive) await api("equipos?id=" + encodeURIComponent(id), null, "DELETE").catch(() => {});
   };
 
-  return { equipos, loading, addEquipo, updateEquipo };
+  return { equipos, enDrive, cargando, guardar, borrar, recargar };
 }
 
 // Detecta repuestos con el mismo nombre/codigo en otros equipos, para el
@@ -166,38 +129,137 @@ function detectarRepuestosCompartidos(equipoActual, todosLosEquipos) {
   return alertas;
 }
 
+function unirItems(actuales, nuevos) {
+  const out = [...(actuales || [])];
+  (nuevos || []).forEach((n) => {
+    const clave = (n.codigo || n.nombre).toLowerCase().trim();
+    if (!out.some((o) => (o.codigo || o.nombre).toLowerCase().trim() === clave)) out.push(n);
+  });
+  return out;
+}
+
+// Prueba los candidatos de cada tipo hasta conseguir un PDF real en Drive.
+async function descargarManuales(equipo, candidatos, tipos, onPaso) {
+  const obtenidos = [];
+  const usados = new Set((equipo.manuales || []).map((m) => m.url));
+  const sinTipo = candidatos.filter((c) => !c.tipo);
+  for (const tipo of tipos) {
+    onPaso(tipo, "buscando", "");
+    const lista = [...candidatos.filter((c) => c.tipo === tipo), ...sinTipo].filter((c) => !usados.has(c.url)).slice(0, 6);
+    let ok = null;
+    let ultimo = "sin links candidatos";
+    for (const c of lista) {
+      onPaso(tipo, "buscando", "probando " + (c.fuente || c.url).slice(0, 50));
+      try {
+        const r = await api("descargar", { url: c.url, tipo, titulo: c.titulo, equipo: equipo.nombre, modelo: equipo.modelo });
+        if (r.ok) {
+          ok = r.manual;
+          usados.add(c.url);
+          usados.add(r.manual.url);
+          break;
+        }
+        ultimo = r.motivo;
+      } catch (e) {
+        ultimo = e.message;
+      }
+    }
+    if (ok) {
+      obtenidos.push(ok);
+      onPaso(tipo, "ok", ok.driveId ? "guardado en Drive (" + ok.fuente + ")" : ok.aviso || ok.fuente);
+    } else onPaso(tipo, "error", "no se encontró PDF descargable: " + ultimo);
+  }
+  return obtenidos;
+}
+
 // ---------------------------------------------------------------------------
 // COMPONENTES
 // ---------------------------------------------------------------------------
+function Icono({ d, size = 18 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d={d} />
+    </svg>
+  );
+}
+const IC = {
+  gear: "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z",
+  download: "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3",
+  search: "M11 19a8 8 0 1 0 0-16 8 8 0 0 0 0 16zM21 21l-4.3-4.3",
+};
 
 function ModalAgregarEquipo({ nombreInicial, onClose, onCreado }) {
   const [pasos, setPasos] = useState([
-    { label: "Buscando manual de usuario", estado: "pendiente" },
-    { label: "Buscando manual técnico", estado: "pendiente" },
-    { label: "Buscando manual de despiece", estado: "pendiente" },
-    { label: "Buscando videos en YouTube", estado: "pendiente" },
-    { label: "Buscando referencias en foros", estado: "pendiente" },
-    { label: "Guardando en Drive", estado: "pendiente" },
-    { label: "Extrayendo insumos y repuestos del manual", estado: "pendiente" },
+    { id: "buscar", label: "Buscando el equipo y sus manuales en internet", estado: "pendiente", det: "" },
+    { id: "usuario", label: "Manual de usuario → Drive", estado: "pendiente", det: "" },
+    { id: "tecnico", label: "Manual técnico → Drive", estado: "pendiente", det: "" },
+    { id: "despiece", label: "Manual de despiece → Drive", estado: "pendiente", det: "" },
+    { id: "videos", label: "Videos de YouTube", estado: "pendiente", det: "" },
+    { id: "extraer", label: "Extrayendo insumos y repuestos del manual", estado: "pendiente", det: "" },
   ]);
+  const [equipo, setEquipo] = useState(null);
+  const [error, setError] = useState("");
   const [terminado, setTerminado] = useState(false);
+
+  const paso = (id, estado, det) => setPasos((prev) => prev.map((p) => (p.id === id ? { ...p, estado, det: det || "" } : p)));
 
   useEffect(() => {
     let cancel = false;
     async function run() {
-      // Progreso visual mientras corre la busqueda real en el backend.
-      for (let i = 0; i < pasos.length - 1; i++) {
-        if (cancel) return;
-        await new Promise((r) => setTimeout(r, 450));
-        setPasos((prev) => prev.map((p, idx) => (idx === i ? { ...p, estado: "ok" } : p)));
+      paso("buscar", "buscando");
+      let info;
+      try {
+        info = await api("buscar", { nombre: nombreInicial });
+      } catch (e) {
+        paso("buscar", "error", e.message);
+        setError(e.message);
+        return;
       }
-      const equipo = await apiAgregarEquipo(nombreInicial);
       if (cancel) return;
-      setPasos((prev) => prev.map((p, idx) => (idx === prev.length - 1 ? { ...p, estado: "ok" } : p)));
+      paso("buscar", "ok", `${[info.marca, info.modelo].filter(Boolean).join(" ") || info.nombre} · ${info.manuales.length} links candidatos`);
+
+      let eq = {
+        id: "eq-" + Date.now(),
+        nombre: nombreInicial,
+        marca: info.marca,
+        modelo: info.modelo,
+        tipoEquipo: info.tipoEquipo,
+        manuales: [],
+        candidatos: info.manuales,
+        videos: [],
+        insumos: info.insumos.map((n) => ({ nombre: n, origen: "web" })),
+        repuestos: info.repuestos.map((r) => ({ ...r, origen: "web" })),
+        creado: new Date().toISOString(),
+      };
+
+      eq.manuales = await descargarManuales(eq, info.manuales, ["usuario", "tecnico", "despiece"], (t, e, d) => !cancel && paso(t, e, d));
+      if (cancel) return;
+
+      paso("videos", "buscando");
+      try {
+        const v = await api("videos", { nombre: [eq.marca, eq.modelo].filter(Boolean).join(" ") || eq.nombre, sugeridos: info.videos });
+        eq.videos = v.videos;
+        paso("videos", v.videos.length ? "ok" : "error", v.videos.length ? v.videos.length + " videos" + (v.aviso ? " (sin API de YouTube)" : "") : v.aviso || "sin resultados");
+      } catch (e) {
+        paso("videos", "error", e.message);
+      }
+      if (cancel) return;
+
+      const base = eq.manuales.find((m) => m.driveId && m.tipo === "despiece") || eq.manuales.find((m) => m.driveId && m.tipo === "tecnico") || eq.manuales.find((m) => m.driveId);
+      if (base) {
+        paso("extraer", "buscando", "leyendo " + base.titulo);
+        try {
+          const x = await api("extraer", { driveId: base.driveId, titulo: base.titulo, equipo: eq.nombre });
+          eq.insumos = unirItems(x.insumos.map((i) => ({ ...i, origen: "auto" })), eq.insumos);
+          eq.repuestos = unirItems(x.repuestos.map((r) => ({ ...r, origen: "auto" })), eq.repuestos);
+          paso("extraer", "ok", `${x.insumos.length} insumos, ${x.repuestos.length} repuestos del manual`);
+        } catch (e) {
+          paso("extraer", "error", e.message);
+        }
+      } else paso("extraer", "error", "no hay manual en Drive para leer (se usan los datos de la web)");
+
+      if (cancel) return;
+      setEquipo(eq);
       setTerminado(true);
-      setTimeout(() => {
-        if (!cancel) onCreado(equipo);
-      }, 500);
     }
     run();
     return () => {
@@ -206,145 +268,298 @@ function ModalAgregarEquipo({ nombreInicial, onClose, onCreado }) {
   }, []);
 
   return (
-    <div className="modal-overlay" onClick={onClose}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
-        <button className="close" onClick={onClose}>×</button>
+    <div className="modal-overlay">
+      <div className="modal">
+        <button className="close" onClick={onClose} aria-label="Cerrar">×</button>
         <h2>Agregando "{nombreInicial}"</h2>
-        <p style={{ color: "var(--muted)", fontSize: "0.85rem" }}>
-          Esto se hace una sola vez por equipo. Después vas a poder completar o corregir lo que falte.
-        </p>
+        <p className="muted small">Busca en internet, se queda solo con PDFs descargables y los guarda en tu Drive. Puede tardar 1–2 minutos.</p>
         <ul className="progress-list">
-          {pasos.map((p, i) => (
-            <li key={i}>
-              {p.estado === "pendiente" && <span className="spinner" />}
+          {pasos.map((p) => (
+            <li key={p.id}>
+              {p.estado === "pendiente" && <span className="dot" />}
+              {p.estado === "buscando" && <span className="spinner" />}
               {p.estado === "ok" && <span className="check">✓</span>}
-              {p.estado === "error" && <span className="fail">✕</span>}
-              <span>{p.label}</span>
+              {p.estado === "error" && <span className="fail">!</span>}
+              <div>
+                <div>{p.label}</div>
+                {p.det && <div className="muted small">{p.det}</div>}
+              </div>
             </li>
           ))}
         </ul>
-        {terminado && <p style={{ color: "var(--accent-2)" }}>Listo. Abriendo ficha del equipo…</p>}
+        {error && (
+          <div className="alert">
+            {error}
+            <div className="small">Revisá la Configuración (⚙) — falta alguna clave o el backend.</div>
+          </div>
+        )}
+        {terminado && (
+          <div className="row-end">
+            <button className="btn primary" onClick={() => onCreado(equipo)}>Guardar y abrir ficha</button>
+          </div>
+        )}
       </div>
     </div>
   );
 }
 
-function InlineAdd({ placeholder, onAdd }) {
+function InlineAdd({ placeholder, onAdd, boton = "Agregar" }) {
   const [val, setVal] = useState("");
+  const enviar = () => {
+    if (val.trim()) {
+      onAdd(val.trim());
+      setVal("");
+    }
+  };
   return (
     <div className="inline-add">
-      <input
-        placeholder={placeholder}
-        value={val}
-        onChange={(e) => setVal(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" && val.trim()) {
-            onAdd(val.trim());
-            setVal("");
-          }
-        }}
-      />
-      <button
-        onClick={() => {
-          if (val.trim()) {
-            onAdd(val.trim());
-            setVal("");
-          }
-        }}
-      >
-        Agregar
-      </button>
+      <input placeholder={placeholder} value={val} onChange={(e) => setVal(e.target.value)} onKeyDown={(e) => e.key === "Enter" && enviar()} />
+      <button className="btn" onClick={enviar}>{boton}</button>
     </div>
   );
 }
 
-function TabManuales({ equipo }) {
-  const tipos = { usuario: "Manual de usuario", tecnico: "Manual técnico", despiece: "Manual de despiece" };
+function TabManuales({ equipo, onUpdate }) {
+  const [estado, setEstado] = useState("");
+  const [ocupado, setOcupado] = useState(false);
+  const [tipoNuevo, setTipoNuevo] = useState("tecnico");
+  const fileRef = useRef(null);
+  const manuales = equipo.manuales || [];
+  const faltan = Object.keys(TIPOS).filter((t) => !manuales.some((m) => m.tipo === t && m.driveId));
+
+  const agregarManual = (m) => onUpdate({ manuales: [...manuales, m] });
+
+  const porUrl = async (url) => {
+    setOcupado(true);
+    setEstado("Descargando y validando PDF…");
+    try {
+      const r = await api("descargar", { url, tipo: tipoNuevo, titulo: TIPOS[tipoNuevo] + " " + (equipo.modelo || equipo.nombre), equipo: equipo.nombre, modelo: equipo.modelo });
+      if (r.ok) {
+        agregarManual(r.manual);
+        setEstado(r.manual.driveId ? "✓ Guardado en Drive" : r.manual.aviso);
+      } else setEstado("✕ " + r.motivo + ". Probá con el link directo al PDF o subí el archivo.");
+    } catch (e) {
+      setEstado("✕ " + e.message);
+    }
+    setOcupado(false);
+  };
+
+  const subirArchivo = async (file) => {
+    if (!file) return;
+    setOcupado(true);
+    setEstado("Subiendo " + file.name + " a Drive…");
+    try {
+      const nombre = `${equipo.nombre} - ${tipoNuevo} - ${file.name}`.replace(/\.pdf$/i, "") + ".pdf";
+      const { uploadUrl } = await api("subir", { nombre, mime: file.type || "application/pdf", size: file.size });
+      const up = await fetch(uploadUrl, { method: "PUT", headers: { "Content-Type": file.type || "application/pdf" }, body: file });
+      if (!up.ok) throw new Error("Drive rechazó la subida (" + up.status + ")");
+      const f = await up.json();
+      agregarManual({
+        tipo: tipoNuevo,
+        titulo: file.name.replace(/\.pdf$/i, ""),
+        url: "",
+        fuente: "subido a mano",
+        tamano: file.size,
+        driveId: f.id,
+        driveLink: f.webViewLink || `https://drive.google.com/file/d/${f.id}/view`,
+      });
+      setEstado("✓ Subido a Drive");
+    } catch (e) {
+      setEstado("✕ " + e.message);
+    }
+    setOcupado(false);
+    if (fileRef.current) fileRef.current.value = "";
+  };
+
+  const reintentar = async () => {
+    setOcupado(true);
+    setEstado("Buscando de nuevo en internet…");
+    try {
+      const nombre = [equipo.marca, equipo.modelo].filter(Boolean).join(" ") || equipo.nombre;
+      const info = await api("buscar", { nombre });
+      const nuevos = await descargarManuales(equipo, info.manuales, faltan, (t, e, d) => setEstado(`${TIPOS[t]}: ${d || e}`));
+      onUpdate({ manuales: [...manuales, ...nuevos], candidatos: info.manuales });
+      setEstado(nuevos.length ? `✓ ${nuevos.length} manual(es) nuevos en Drive` : "No se encontraron PDFs descargables. Subí el PDF o pegá el link directo.");
+    } catch (e) {
+      setEstado("✕ " + e.message);
+    }
+    setOcupado(false);
+  };
+
+  const quitar = (i) => {
+    if (confirm("¿Quitar este manual de la ficha? (el archivo sigue en Drive)")) onUpdate({ manuales: manuales.filter((_, j) => j !== i) });
+  };
+
   return (
     <div>
-      {(equipo.manuales || []).length === 0 && (
-        <p style={{ color: "var(--muted)" }}>Todavía no hay manuales cargados para este equipo.</p>
-      )}
-      {(equipo.manuales || []).map((m, i) => (
+      {manuales.length === 0 && <p className="muted">Todavía no hay manuales guardados para este equipo.</p>}
+      {manuales.map((m, i) => (
         <div className="link-item" key={i}>
-          <div>
-            <a href={m.url} target="_blank" rel="noreferrer">{m.titulo || tipos[m.tipo] || "Manual"}</a>
-            {m.fuente && <div className="tag">fuente: {m.fuente}</div>}
+          <div className="grow">
+            <a href={m.driveLink || m.url} target="_blank" rel="noreferrer">{m.titulo || TIPOS[m.tipo] || "Manual"}</a>
+            <div className="small muted">
+              {m.driveId ? "✓ en Drive" : "⚠ solo link externo"}
+              {m.fuente && " · " + m.fuente}
+              {m.tamano ? " · " + (m.tamano / 1048576).toFixed(1) + " MB" : ""}
+              {m.url && m.driveLink && (
+                <React.Fragment>
+                  {" · "}
+                  <a href={m.url} target="_blank" rel="noreferrer">origen</a>
+                </React.Fragment>
+              )}
+            </div>
           </div>
-          <span className="tag">{tipos[m.tipo] || m.tipo}</span>
+          <span className="tag">{TIPOS[m.tipo] || m.tipo || "manual"}</span>
+          <button className="icon-btn" title="Quitar" onClick={() => quitar(i)}>×</button>
         </div>
       ))}
-    </div>
-  );
-}
 
-function TabVideos({ equipo }) {
-  return (
-    <div>
-      {(equipo.videos || []).length === 0 && (
-        <p style={{ color: "var(--muted)" }}>Todavía no hay videos encontrados para este equipo.</p>
+      {faltan.length > 0 && (
+        <div className="hint">
+          Faltan: {faltan.map((t) => TIPOS[t]).join(", ")}.{" "}
+          <button className="btn small" disabled={ocupado} onClick={reintentar}>Buscar de nuevo</button>
+        </div>
       )}
-      {(equipo.videos || []).map((v, i) => (
-        <div className="link-item" key={i}>
-          <a href={v.url} target="_blank" rel="noreferrer">{v.titulo}</a>
-          <span className="tag">YouTube</span>
+
+      <div className="panel-sub">
+        <div className="section-title"><h4>Agregar manual a mano</h4></div>
+        <p className="small muted">Si el sitio del fabricante no deja descargar (ej. páginas de Mindray que piden login), pegá el link directo al PDF o subí el archivo desde tu teléfono/PC.</p>
+        <select value={tipoNuevo} onChange={(e) => setTipoNuevo(e.target.value)}>
+          {Object.entries(TIPOS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+        </select>
+        <InlineAdd placeholder="https://…/manual.pdf" boton="Descargar" onAdd={porUrl} />
+        <div className="inline-add">
+          <input ref={fileRef} type="file" accept="application/pdf,.pdf" disabled={ocupado} onChange={(e) => subirArchivo(e.target.files[0])} />
         </div>
-      ))}
+        {estado && <div className="small estado">{ocupado && <span className="spinner" />} {estado}</div>}
+      </div>
     </div>
   );
 }
 
-function TabInsumos({ equipo, onUpdate }) {
-  const insumos = equipo.insumos || [];
+function TabVideos({ equipo, onUpdate }) {
+  const [abierto, setAbierto] = useState(null);
+  const [estado, setEstado] = useState("");
+  const videos = equipo.videos || [];
+  const nombre = [equipo.marca, equipo.modelo].filter(Boolean).join(" ") || equipo.nombre;
+
+  const buscar = async () => {
+    setEstado("Buscando…");
+    try {
+      const v = await api("videos", { nombre, sugeridos: videos });
+      onUpdate({ videos: unirItems(videos.map((x) => ({ ...x, nombre: x.id })), v.videos.map((x) => ({ ...x, nombre: x.id }))) });
+      setEstado(v.aviso || (v.videos.length ? "" : "Sin resultados"));
+    } catch (e) {
+      setEstado("✕ " + e.message);
+    }
+  };
+
+  const agregar = (url) => {
+    const m = url.match(/(?:v=|youtu\.be\/|embed\/|shorts\/)([\w-]{11})/);
+    if (!m) return setEstado("Link de YouTube no válido");
+    onUpdate({ videos: [...videos, { id: m[1], titulo: "Video agregado", url: "https://www.youtube.com/watch?v=" + m[1] }] });
+  };
+
   return (
     <div>
-      {insumos.length === 0 && <p style={{ color: "var(--muted)" }}>Sin insumos cargados todavía.</p>}
-      {insumos.map((it, i) => (
-        <div className="item-row" key={i}>
-          <span>{it.nombre}</span>
-          <span className="origen">{it.origen === "auto" ? "detectado del manual" : "agregado a mano"}</span>
-        </div>
-      ))}
-      <InlineAdd
-        placeholder="Agregar insumo que no se detectó..."
-        onAdd={(nombre) => onUpdate({ insumos: [...insumos, { nombre, origen: "manual" }] })}
-      />
+      {videos.length === 0 && <p className="muted">Todavía no hay videos para este equipo.</p>}
+      <div className="video-grid">
+        {videos.map((v, i) => {
+          const id = v.id || ((v.url || "").match(/(?:v=|youtu\.be\/|embed\/|shorts\/)([\w-]{11})/) || [])[1];
+          if (!id) return null;
+          return (
+            <div className="video-card" key={id + i}>
+              {abierto === id ? (
+                <iframe
+                  src={`https://www.youtube-nocookie.com/embed/${id}?autoplay=1`}
+                  title={v.titulo}
+                  allow="accelerometer; autoplay; encrypted-media; gyroscope; picture-in-picture"
+                  allowFullScreen
+                />
+              ) : (
+                <button className="thumb" onClick={() => setAbierto(id)} style={{ backgroundImage: `url(https://i.ytimg.com/vi/${id}/hqdefault.jpg)` }}>
+                  <span className="play">▶</span>
+                </button>
+              )}
+              <div className="video-meta">
+                <a href={`https://www.youtube.com/watch?v=${id}`} target="_blank" rel="noreferrer">{v.titulo}</a>
+                {v.canal && <div className="small muted">{v.canal}</div>}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      <div className="row gap wrap mt">
+        <button className="btn" onClick={buscar}>Buscar videos</button>
+        <a className="btn" href={`https://www.youtube.com/results?search_query=${encodeURIComponent(nombre + " service")}`} target="_blank" rel="noreferrer">Abrir búsqueda en YouTube</a>
+      </div>
+      <InlineAdd placeholder="Pegar link de YouTube…" onAdd={agregar} />
+      {estado && <div className="small muted mt">{estado}</div>}
     </div>
   );
 }
 
-function TabRepuestos({ equipo, todosLosEquipos, onUpdate }) {
-  const repuestos = equipo.repuestos || [];
-  const alertas = useMemo(() => detectarRepuestosCompartidos(equipo, todosLosEquipos), [equipo, todosLosEquipos]);
+function ListaItems({ items, onChange, placeholder, alertas }) {
   return (
     <div>
-      {repuestos.length === 0 && <p style={{ color: "var(--muted)" }}>Sin repuestos cargados todavía.</p>}
-      {repuestos.map((it, i) => (
+      {items.length === 0 && <p className="muted">Sin datos cargados todavía.</p>}
+      {items.map((it, i) => (
         <div key={i}>
           <div className="item-row">
             <span>
               {it.nombre} {it.codigo && <span className="tag">{it.codigo}</span>}
+              {it.pagina ? <span className="small muted"> · pág. {it.pagina}</span> : null}
             </span>
-            <span className="origen">{it.origen === "auto" ? "detectado del manual" : "agregado a mano"}</span>
+            <span className="row gap">
+              <span className="origen">{it.origen === "auto" ? "del manual" : it.origen === "web" ? "de la web" : "a mano"}</span>
+              <button className="icon-btn" title="Quitar" onClick={() => onChange(items.filter((_, j) => j !== i))}>×</button>
+            </span>
           </div>
-          {alertas[it.nombre] && (
-            <div className="shared-alert">
-              ⚠ Este repuesto también aplica a: {alertas[it.nombre].join(", ")} — podés unificar el pedido.
-            </div>
+          {alertas && alertas[it.nombre] && (
+            <div className="shared-alert">⚠ Este repuesto también aplica a: {alertas[it.nombre].join(", ")} — podés unificar el pedido.</div>
           )}
         </div>
       ))}
-      <InlineAdd
-        placeholder="Agregar repuesto que no se detectó..."
-        onAdd={(nombre) => onUpdate({ repuestos: [...repuestos, { nombre, origen: "manual", compartidoCon: [] }] })}
-      />
+      <InlineAdd placeholder={placeholder} onAdd={(nombre) => onChange([...items, { nombre, origen: "manual" }])} />
+    </div>
+  );
+}
+
+function BotonExtraer({ equipo, onUpdate }) {
+  const [estado, setEstado] = useState("");
+  const base = (equipo.manuales || []).find((m) => m.driveId && m.tipo === "despiece") || (equipo.manuales || []).find((m) => m.driveId && m.tipo === "tecnico") || (equipo.manuales || []).find((m) => m.driveId);
+  if (!base) return null;
+  const run = async () => {
+    setEstado("Leyendo " + base.titulo + "…");
+    try {
+      const x = await api("extraer", { driveId: base.driveId, titulo: base.titulo, equipo: equipo.nombre });
+      onUpdate({
+        insumos: unirItems(equipo.insumos, x.insumos.map((i) => ({ ...i, origen: "auto" }))),
+        repuestos: unirItems(equipo.repuestos, x.repuestos.map((r) => ({ ...r, origen: "auto" }))),
+      });
+      setEstado(`✓ ${x.insumos.length} insumos y ${x.repuestos.length} repuestos leídos del manual`);
+    } catch (e) {
+      setEstado("✕ " + e.message);
+    }
+  };
+  return (
+    <div className="row gap wrap mb">
+      <button className="btn small" onClick={run}>Releer del manual</button>
+      {estado && <span className="small muted">{estado}</span>}
     </div>
   );
 }
 
 function TabConsulta({ equipo }) {
+  const enDrive = (equipo.manuales || []).filter((m) => m.driveId).length;
   const [mensajes, setMensajes] = useState([
-    { rol: "bot", texto: `Preguntame algo sobre el ${equipo.nombre}. Busco la respuesta en sus manuales.`, fuentes: [] },
+    {
+      rol: "bot",
+      texto: enDrive
+        ? `Preguntame lo que necesites del ${equipo.nombre}. Respondo leyendo sus ${enDrive} manual(es) guardados en Drive y te cito la página.`
+        : `Todavía no hay manuales en Drive para el ${equipo.nombre}; voy a responder buscando en la web. Cargá el manual en la pestaña Manuales para respuestas exactas.`,
+      fuentes: [],
+    },
   ]);
   const [input, setInput] = useState("");
   const [cargando, setCargando] = useState(false);
@@ -352,17 +567,26 @@ function TabConsulta({ equipo }) {
 
   useEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-  }, [mensajes]);
+  }, [mensajes, cargando]);
 
   const enviar = async () => {
     const pregunta = input.trim();
-    if (!pregunta) return;
+    if (!pregunta || cargando) return;
     setInput("");
+    const historial = mensajes.slice(1);
     setMensajes((prev) => [...prev, { rol: "user", texto: pregunta }]);
     setCargando(true);
-    const r = await apiConsultar(equipo.id, pregunta);
+    try {
+      const r = await api("consultar", {
+        equipo: { nombre: equipo.nombre, marca: equipo.marca, modelo: equipo.modelo, manuales: equipo.manuales },
+        pregunta,
+        historial,
+      });
+      setMensajes((prev) => [...prev, { rol: "bot", texto: r.respuesta, fuentes: r.fuentes || [], modo: r.modo }]);
+    } catch (e) {
+      setMensajes((prev) => [...prev, { rol: "bot", texto: "✕ " + e.message, fuentes: [] }]);
+    }
     setCargando(false);
-    setMensajes((prev) => [...prev, { rol: "bot", texto: r.respuesta, fuentes: r.fuentes || [] }]);
   };
 
   return (
@@ -373,7 +597,8 @@ function TabConsulta({ equipo }) {
             {m.texto}
             {m.fuentes && m.fuentes.length > 0 && (
               <div className="sources">
-                Fuente: {m.fuentes.map((f, j) => (
+                {m.modo === "web" ? "Fuentes web: " : "Manuales: "}
+                {m.fuentes.map((f, j) => (
                   <span key={j}>
                     <a href={f.url} target="_blank" rel="noreferrer">{f.titulo || f.url}</a>
                     {j < m.fuentes.length - 1 ? ", " : ""}
@@ -383,27 +608,23 @@ function TabConsulta({ equipo }) {
             )}
           </div>
         ))}
-        {cargando && <div className="msg bot">Buscando en el manual…</div>}
+        {cargando && <div className="msg bot"><span className="spinner" /> Leyendo el manual…</div>}
       </div>
       <div className="chat-input">
-        <input
-          placeholder="Ej: ¿Cómo se calibra el sensor de SpO2?"
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && enviar()}
-        />
-        <button onClick={enviar}>Enviar</button>
+        <input placeholder="Ej: ¿Cómo se calibra el módulo de NIBP?" value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => e.key === "Enter" && enviar()} />
+        <button className="btn primary" onClick={enviar} disabled={cargando}>Enviar</button>
       </div>
     </div>
   );
 }
 
-function FichaEquipo({ equipo, todosLosEquipos, onVolver, onUpdate }) {
+function FichaEquipo({ equipo, todosLosEquipos, onVolver, onUpdate, onBorrar }) {
   const [tab, setTab] = useState("consulta");
+  const alertas = useMemo(() => detectarRepuestosCompartidos(equipo, todosLosEquipos), [equipo, todosLosEquipos]);
   const tabs = [
     { id: "consulta", label: "Consulta" },
-    { id: "manuales", label: "Manuales" },
-    { id: "videos", label: "Videos" },
+    { id: "manuales", label: `Manuales (${(equipo.manuales || []).length})` },
+    { id: "videos", label: `Videos (${(equipo.videos || []).length})` },
     { id: "insumos", label: "Insumos" },
     { id: "repuestos", label: "Repuestos" },
   ];
@@ -412,41 +633,198 @@ function FichaEquipo({ equipo, todosLosEquipos, onVolver, onUpdate }) {
     <div>
       <button className="back-btn" onClick={onVolver}>← Volver a la biblioteca</button>
       <div className="equipo-title">
-        <h2>{equipo.nombre}</h2>
-        {(equipo.marca || equipo.modelo) && (
-          <span className="marca-modelo">{equipo.marca} {equipo.modelo}</span>
-        )}
-      </div>
-      {equipo.imagenes && equipo.imagenes.length > 0 && (
-        <div className="images-strip">
-          {equipo.imagenes.map((src, i) => (
-            <img key={i} src={src} alt={equipo.nombre} />
-          ))}
+        <div>
+          <h2>{equipo.nombre}</h2>
+          <span className="marca-modelo">{[equipo.tipoEquipo, equipo.marca, equipo.modelo].filter(Boolean).join(" · ")}</span>
         </div>
-      )}
+        <button className="btn small danger-outline" onClick={() => confirm(`¿Eliminar "${equipo.nombre}" de la biblioteca? Los PDFs quedan en Drive.`) && onBorrar()}>Eliminar</button>
+      </div>
       <div className="tabs">
         {tabs.map((t) => (
-          <div key={t.id} className={`tab ${tab === t.id ? "active" : ""}`} onClick={() => setTab(t.id)}>
-            {t.label}
-          </div>
+          <button key={t.id} className={`tab ${tab === t.id ? "active" : ""}`} onClick={() => setTab(t.id)}>{t.label}</button>
         ))}
       </div>
-      {tab === "consulta" && <TabConsulta equipo={equipo} />}
-      {tab === "manuales" && <TabManuales equipo={equipo} />}
-      {tab === "videos" && <TabVideos equipo={equipo} />}
-      {tab === "insumos" && <TabInsumos equipo={equipo} onUpdate={(patch) => onUpdate(equipo.id, patch)} />}
+      {tab === "consulta" && <TabConsulta key={equipo.id} equipo={equipo} />}
+      {tab === "manuales" && <TabManuales equipo={equipo} onUpdate={onUpdate} />}
+      {tab === "videos" && <TabVideos equipo={equipo} onUpdate={onUpdate} />}
+      {tab === "insumos" && (
+        <div>
+          <BotonExtraer equipo={equipo} onUpdate={onUpdate} />
+          <ListaItems items={equipo.insumos || []} onChange={(insumos) => onUpdate({ insumos })} placeholder="Agregar insumo que no se detectó..." />
+        </div>
+      )}
       {tab === "repuestos" && (
-        <TabRepuestos equipo={equipo} todosLosEquipos={todosLosEquipos} onUpdate={(patch) => onUpdate(equipo.id, patch)} />
+        <div>
+          <BotonExtraer equipo={equipo} onUpdate={onUpdate} />
+          <ListaItems items={equipo.repuestos || []} alertas={alertas} onChange={(repuestos) => onUpdate({ repuestos })} placeholder="Agregar repuesto que no se detectó..." />
+        </div>
       )}
     </div>
   );
 }
 
+// ---------------------------------------------------------------------------
+// CONFIGURACION (con PIN de confirmacion)
+// ---------------------------------------------------------------------------
+function PinGate({ onOk, onClose }) {
+  const [pin, setPin] = useState("");
+  const [pin2, setPin2] = useState("");
+  const [err, setErr] = useState("");
+  const [modo, setModo] = useState("cargando"); // servidor | local | crear
+  useEffect(() => {
+    api("estado")
+      .then((s) => setModo(s.pinServidor ? "servidor" : leerLS(LS_PIN, null) ? "local" : "crear"))
+      .catch(() => setModo(leerLS(LS_PIN, null) ? "local" : "crear"));
+  }, []);
+
+  const confirmar = async () => {
+    setErr("");
+    if (modo === "servidor") {
+      const r = await api("estado", { pin }).catch(() => ({ ok: false }));
+      return r.ok ? onOk() : setErr("PIN incorrecto");
+    }
+    if (modo === "crear") {
+      if (pin.length < 4) return setErr("El PIN debe tener al menos 4 dígitos");
+      if (pin !== pin2) return setErr("Los PIN no coinciden");
+      guardarLS(LS_PIN, await sha256(pin));
+      return onOk();
+    }
+    return (await sha256(pin)) === leerLS(LS_PIN, "") ? onOk() : setErr("PIN incorrecto");
+  };
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal narrow" onClick={(e) => e.stopPropagation()}>
+        <button className="close" onClick={onClose} aria-label="Cerrar">×</button>
+        <h2>Acceso a Configuración</h2>
+        {modo === "cargando" && <p className="muted"><span className="spinner" /> Verificando…</p>}
+        {modo === "crear" && <p className="small muted">Primera vez: creá un PIN para proteger la configuración en este dispositivo.</p>}
+        {modo !== "cargando" && (
+          <form onSubmit={(e) => { e.preventDefault(); confirmar(); }}>
+            <input className="field" type="password" inputMode="numeric" autoFocus placeholder="PIN" value={pin} onChange={(e) => setPin(e.target.value)} />
+            {modo === "crear" && <input className="field" type="password" inputMode="numeric" placeholder="Repetir PIN" value={pin2} onChange={(e) => setPin2(e.target.value)} />}
+            {err && <div className="alert">{err}</div>}
+            <div className="row-end"><button className="btn primary" type="submit">Confirmar</button></div>
+          </form>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function Estado({ ok, label, detalle }) {
+  return (
+    <div className="estado-row">
+      <span className={ok ? "check" : "fail"}>{ok ? "✓" : "✕"}</span>
+      <div>
+        <div>{label}</div>
+        {detalle && <div className="small muted">{detalle}</div>}
+      </div>
+    </div>
+  );
+}
+
+function ModalConfig({ onClose, onGuardado }) {
+  const [cfg, setCfg] = useState(() => leerLS(LS_CFG, {}));
+  const [estado, setEstado] = useState(null);
+  const [probando, setProbando] = useState(false);
+
+  const probar = async () => {
+    setProbando(true);
+    try {
+      setEstado(await api("estado"));
+    } catch (e) {
+      setEstado({ error: e.message });
+    }
+    setProbando(false);
+  };
+  useEffect(() => {
+    probar();
+  }, []);
+
+  const set = (k) => (e) => setCfg({ ...cfg, [k]: e.target.value.trim() });
+  const guardar = async () => {
+    guardarLS(LS_CFG, cfg);
+    await probar();
+    onGuardado();
+  };
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <button className="close" onClick={onClose} aria-label="Cerrar">×</button>
+        <h2>Configuración de APIs</h2>
+
+        <div className="panel-sub">
+          <div className="section-title"><h4>Estado</h4><button className="btn small" onClick={probar} disabled={probando}>{probando ? "Probando…" : "Probar conexión"}</button></div>
+          {estado && estado.error && <div className="alert">{estado.error}</div>}
+          {estado && !estado.error && (
+            <div>
+              <Estado ok={estado.gemini} label={`Gemini (IA de búsqueda y consultas) · ${estado.geminiModel}`} detalle={!estado.gemini && "Obligatoria. Clave gratis en aistudio.google.com/apikey"} />
+              <Estado ok={estado.drive} label="Google Drive (donde se alojan los manuales)" detalle={estado.drive ? "Carpeta: Manuales SEM" : !estado.driveCliente ? "Faltan GOOGLE_CLIENT_ID y GOOGLE_CLIENT_SECRET en Vercel" : estado.driveError || "Falta conectar la cuenta"} />
+              <Estado ok={estado.youtube} label="YouTube Data API (opcional)" detalle={!estado.youtube && "Sin esta clave se usan solo los videos que encuentra Gemini"} />
+            </div>
+          )}
+          {estado && estado.driveCliente && !estado.drive && (
+            <a className="btn primary mt" href="/api/drive-auth">Conectar Google Drive</a>
+          )}
+        </div>
+
+        <div className="panel-sub">
+          <div className="section-title"><h4>Claves en este navegador</h4></div>
+          <p className="small muted">Opcional: lo ideal es cargarlas como variables de entorno en Vercel (quedan para todos). Lo que pongas acá se guarda solo en este dispositivo y tiene prioridad.</p>
+          <label>Gemini API key<input className="field" type="password" value={cfg.geminiKey || ""} onChange={set("geminiKey")} placeholder="AIza…" /></label>
+          <label>Modelo Gemini<input className="field" value={cfg.geminiModel || ""} onChange={set("geminiModel")} placeholder="gemini-flash-latest" /></label>
+          <label>YouTube API key<input className="field" type="password" value={cfg.youtubeKey || ""} onChange={set("youtubeKey")} placeholder="AIza…" /></label>
+          <label>Drive refresh token<input className="field" type="password" value={cfg.refreshToken || ""} onChange={set("refreshToken")} placeholder="se completa con “Conectar Google Drive”" /></label>
+          <label>ID de carpeta de Drive (opcional)<input className="field" value={cfg.folderId || ""} onChange={set("folderId")} placeholder="por defecto crea “Manuales SEM”" /></label>
+          <div className="row-end gap">
+            <button className="btn" onClick={() => { setCfg({}); guardarLS(LS_CFG, {}); }}>Borrar</button>
+            <button className="btn primary" onClick={guardar}>Guardar</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// INSTALAR APP (PWA)
+// ---------------------------------------------------------------------------
+function useInstalar() {
+  const [evento, setEvento] = useState(null);
+  const [instalada, setInstalada] = useState(() => window.matchMedia("(display-mode: standalone)").matches || navigator.standalone === true);
+  useEffect(() => {
+    const h = (e) => {
+      e.preventDefault();
+      setEvento(e);
+    };
+    window.addEventListener("beforeinstallprompt", h);
+    window.addEventListener("appinstalled", () => setInstalada(true));
+    return () => window.removeEventListener("beforeinstallprompt", h);
+  }, []);
+  const esIOS = /iphone|ipad|ipod/i.test(navigator.userAgent);
+  const instalar = async () => {
+    if (evento) {
+      evento.prompt();
+      await evento.userChoice;
+      setEvento(null);
+    } else if (esIOS) alert("En iPhone/iPad: tocá Compartir y luego “Agregar a pantalla de inicio”.");
+    else alert("Abrí el menú del navegador (⋮) y elegí “Instalar app” o “Agregar a pantalla principal”.");
+  };
+  return { mostrar: !instalada, instalar };
+}
+
+// ---------------------------------------------------------------------------
+// APP
+// ---------------------------------------------------------------------------
 function App() {
-  const { equipos, addEquipo, updateEquipo } = useEquipos();
+  const { equipos, enDrive, cargando, guardar, borrar, recargar } = useEquipos();
   const [busqueda, setBusqueda] = useState("");
   const [equipoAbierto, setEquipoAbierto] = useState(null);
-  const [agregando, setAgregando] = useState(null); // nombre en proceso de alta
+  const [agregando, setAgregando] = useState(null);
+  const [config, setConfig] = useState(null); // null | "pin" | "abierta"
+  const inst = useInstalar();
 
   const term = busqueda.trim().toLowerCase();
 
@@ -455,9 +833,9 @@ function App() {
     if (!term) return equipos;
     return equipos.filter((e) => {
       const camposTexto = [
-        e.nombre, e.marca, e.modelo,
+        e.nombre, e.marca, e.modelo, e.tipoEquipo,
         ...(e.manuales || []).map((m) => m.titulo),
-        ...(e.insumos || []).map((i) => i.nombre),
+        ...(e.insumos || []).map((i) => i.nombre + " " + (i.codigo || "")),
         ...(e.repuestos || []).map((r) => r.nombre + " " + (r.codigo || "")),
       ]
         .filter(Boolean)
@@ -468,56 +846,71 @@ function App() {
   }, [equipos, term]);
 
   const existeExacto = equipos.some((e) => e.nombre.trim().toLowerCase() === term);
-
   const equipoActual = equipoAbierto ? equipos.find((e) => e.id === equipoAbierto) : null;
+
+  const actualizar = (patch) => guardar({ ...equipoActual, ...patch });
 
   return (
     <div className="app">
       <header className="topbar">
-        <div>
-          <h1>Manuales de Equipos</h1>
-          <div className="sub">Biblioteca técnica, insumos y repuestos — SEM</div>
+        <div className="brand">
+          <img src="icon.svg" alt="" width="40" height="40" />
+          <div>
+            <h1>Manuales de Equipos</h1>
+            <div className="sub">Biblioteca técnica, insumos y repuestos — SEM</div>
+          </div>
+        </div>
+        <div className="row gap">
+          {inst.mostrar && (
+            <button className="btn" onClick={inst.instalar}><Icono d={IC.download} size={16} /> Instalar app</button>
+          )}
+          <button className="btn" onClick={() => setConfig("pin")} title="Configuración"><Icono d={IC.gear} size={16} /> Configuración</button>
         </div>
       </header>
 
+      {!cargando && !enDrive && (
+        <div className="banner">
+          Drive no está conectado: la biblioteca se guarda solo en este dispositivo. <button className="linklike" onClick={() => setConfig("pin")}>Configurar</button>
+        </div>
+      )}
+
       {!equipoActual && (
         <React.Fragment>
-          <div className="search-box">
-            <input
-              placeholder="Buscar equipo, manual, insumo o repuesto..."
-              value={busqueda}
-              onChange={(e) => setBusqueda(e.target.value)}
-            />
-            <span className="icon">⌕</span>
-          </div>
+          <form className="search-box" onSubmit={(e) => { e.preventDefault(); if (term && !existeExacto) setAgregando(busqueda.trim()); }}>
+            <input placeholder="Nombre del equipo o manual (ej: Mindray iPM 10)…" value={busqueda} onChange={(e) => setBusqueda(e.target.value)} />
+            <span className="icon"><Icono d={IC.search} /></span>
+          </form>
 
           {term && !existeExacto && (
             <div className="add-row">
-              <span>No encontramos "{busqueda}" en la biblioteca.</span>
-              <button className="add-btn" onClick={() => setAgregando(busqueda.trim())}>
-                + Agregar "{busqueda.trim()}"
-              </button>
+              <span>{resultados.length ? "¿No es ninguno de estos?" : `"${busqueda.trim()}" no está en la biblioteca.`}</span>
+              <button className="btn primary" onClick={() => setAgregando(busqueda.trim())}>+ Buscar y agregar "{busqueda.trim()}"</button>
             </div>
           )}
 
-          {resultados.length === 0 ? (
-            <div className="empty-state">Sin resultados. Agregá el equipo con el botón de arriba.</div>
+          {cargando && equipos.length === 0 ? (
+            <div className="empty-state"><span className="spinner" /> Cargando biblioteca…</div>
+          ) : resultados.length === 0 ? (
+            <div className="empty-state">
+              {term ? "Sin resultados." : "La biblioteca está vacía. Escribí el nombre de un equipo arriba y tocá “Buscar y agregar”: la app busca sus manuales en internet, los guarda en Drive y después le podés hacer consultas."}
+            </div>
           ) : (
             <div className="grid">
-              {resultados.map((e) => (
-                <div className="card" key={e.id} onClick={() => setEquipoAbierto(e.id)}>
-                  <h3>{e.nombre}</h3>
-                  <div className="meta">{e.marca} {e.modelo}</div>
-                  <div className="badge-row">
-                    <span className={`badge ${(e.manuales || []).length ? "ok" : "warn"}`}>
-                      {(e.manuales || []).length} manuales
-                    </span>
-                    <span className="badge">{(e.videos || []).length} videos</span>
-                    <span className="badge">{(e.insumos || []).length} insumos</span>
-                    <span className="badge">{(e.repuestos || []).length} repuestos</span>
-                  </div>
-                </div>
-              ))}
+              {resultados.map((e) => {
+                const enD = (e.manuales || []).filter((m) => m.driveId).length;
+                return (
+                  <button className="card" key={e.id} onClick={() => setEquipoAbierto(e.id)}>
+                    <h3>{e.nombre}</h3>
+                    <div className="meta">{[e.marca, e.modelo].filter(Boolean).join(" ") || e.tipoEquipo}</div>
+                    <div className="badge-row">
+                      <span className={`badge ${enD ? "ok" : "warn"}`}>{enD} manuales en Drive</span>
+                      <span className="badge">{(e.videos || []).length} videos</span>
+                      <span className="badge">{(e.insumos || []).length} insumos</span>
+                      <span className="badge">{(e.repuestos || []).length} repuestos</span>
+                    </div>
+                  </button>
+                );
+              })}
             </div>
           )}
         </React.Fragment>
@@ -528,7 +921,11 @@ function App() {
           equipo={equipoActual}
           todosLosEquipos={equipos}
           onVolver={() => setEquipoAbierto(null)}
-          onUpdate={updateEquipo}
+          onUpdate={actualizar}
+          onBorrar={() => {
+            borrar(equipoActual.id);
+            setEquipoAbierto(null);
+          }}
         />
       )}
 
@@ -537,19 +934,26 @@ function App() {
           nombreInicial={agregando}
           onClose={() => setAgregando(null)}
           onCreado={async (equipo) => {
-            const creado = await addEquipo(equipo);
+            await guardar(equipo);
             setAgregando(null);
             setBusqueda("");
-            setEquipoAbierto(creado.id);
+            setEquipoAbierto(equipo.id);
           }}
         />
       )}
 
+      {config === "pin" && <PinGate onOk={() => setConfig("abierta")} onClose={() => setConfig(null)} />}
+      {config === "abierta" && <ModalConfig onClose={() => setConfig(null)} onGuardado={recargar} />}
+
       <footer className="note">
-        Acceso abierto, sin login. Las claves de las IA quedan del lado del servidor.
+        {enDrive ? "✓ Biblioteca sincronizada con Google Drive" : "Biblioteca local"} · Las claves de las IA quedan del lado del servidor.
       </footer>
     </div>
   );
 }
 
 ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => navigator.serviceWorker.register("sw.js").catch(() => {}));
+}
