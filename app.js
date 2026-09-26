@@ -266,7 +266,11 @@ function ModalAgregarEquipo({ nombreInicial, onClose, onCreado }) {
       }
       if (cancel) return;
       const porIA = (info.ias || []).map((r) => `${IAS[r.ia]} ${r.ok ? r.links + " links" : "✕"}`).join(" · ");
-      paso("buscar", "ok", `${[info.marca, info.modelo].filter(Boolean).join(" ") || info.nombre} · ${info.manuales.length} links candidatos${porIA ? " (" + porIA + ")" : ""}`);
+      if (info.manuales.length === 0 && info.aviso) {
+        paso("buscar", "error", info.aviso);
+      } else {
+        paso("buscar", "ok", `${[info.marca, info.modelo].filter(Boolean).join(" ") || info.nombre} · ${info.manuales.length} links candidatos${porIA ? " (" + porIA + ")" : ""}`);
+      }
 
       let eq = {
         id: "eq-" + Date.now(),
@@ -1087,6 +1091,7 @@ function GuiaApis({ estado }) {
         <ol>
           <li>Entrá a <L href="https://aistudio.google.com/apikey">Google AI Studio → API keys</L> y tocá “Create API key”.</li>
           <li>Copiala a Vercel como <code>GEMINI_API_KEY</code> (o pegala abajo para probar ya).</li>
+          <li><b>Importante para que encuentre manuales:</b> la clave sirve para preguntas, pero la búsqueda en Google (necesaria para encontrar los PDF) no tiene cupo gratis. Andá a <L href="https://console.cloud.google.com/billing/linkedaccount">Facturación de Google Cloud</L> y vinculá una tarjeta al proyecto de tu clave — el uso real de esta app cuesta centavos, no es una suscripción. Sin esto, "Buscar y agregar" no va a encontrar nada. Alternativa sin tarjeta: agregar Grok abajo (trae su propia búsqueda).</li>
         </ol>
       </Paso>
 
