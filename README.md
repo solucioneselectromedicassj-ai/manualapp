@@ -47,8 +47,9 @@ La misma guía con links está en la app: ⚙ Configuración → *Guía rápida*
 - En Consulta, la casilla **Comparar IAs** pregunta a todas y una IA jueza elige la mejor respuesta (las demás quedan desplegables). Solo Gemini lee los PDF; Grok y DeepSeek responden con búsqueda web.
 - Si Gemini se queda sin cupo, responde la siguiente IA disponible.
 
-## Fallas, fotos y archivos
-- **Fallas**: busca las fallas más comunes en el manual (troubleshooting) y en foros; podés registrar las tuyas con su reparación y foto, y sumar otras formas de reparar. Las consultas usan ese registro propio.
+## Fallas, códigos de acceso, fotos y archivos
+- **Fallas**: busca las fallas y sus **códigos de error** (Err 12, E-04, etc.) más comunes en el manual (troubleshooting) y en foros; podés registrar las tuyas con su reparación y foto, y sumar otras formas de reparar. Las consultas usan ese registro propio.
+- **Acceso** (pestaña nueva): cómo llegar a la pantalla del modo de servicio/configuración de cada equipo, y una lista de códigos candidatos (de fábrica o genéricos que circulan entre técnicos) para probar. Al marcar uno como "✓ Funcionó" queda fijado arriba como el código confirmado — la próxima vez no hay que volver a probar todos. Ese código y los pasos de acceso también alimentan las Consultas, y la biblioteca muestra un 🔑 en la tarjeta del equipo que ya tiene uno confirmado.
 - **Fotos y archivos**: fotos (se achican antes de subir) y cualquier archivo que no esté en la app, guardados en Drive. Los PDF subidos también se usan en las consultas.
 
 ## Instalar como app
