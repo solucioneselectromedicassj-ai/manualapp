@@ -15,7 +15,11 @@ module.exports = handler(async (req, res, cfg) => {
     .slice(0, 30)
     .map((f) => `- ${f.falla}: ${[f.solucion, ...(f.notas || []).map((n) => n.texto)].filter(Boolean).join(" / ")}`)
     .join("\n");
-  const extra = propias ? `\n\nExperiencia registrada por el equipo tecnico (usala y citala como "registro propio"):\n${propias}` : "";
+  const codigoOk = (equipo.codigosAcceso || []).find((c) => c.estado === "confirmado");
+  const acceso = codigoOk
+    ? `\n\nCódigo de acceso al modo de servicio ya confirmado para este equipo: "${codigoOk.codigo}".${equipo.accesoPasos ? " Pasos para llegar a la pantalla donde se ingresa: " + equipo.accesoPasos : ""}`
+    : "";
+  const extra = (propias ? `\n\nExperiencia registrada por el equipo tecnico (usala y citala como "registro propio"):\n${propias}` : "") + acceso;
   const manuales = (equipo.manuales || [])
     .filter((m) => m.driveId || /\.pdf|^https?:/i.test(m.url || ""))
     .sort((a, b) => (ORDEN[a.tipo] ?? 9) - (ORDEN[b.tipo] ?? 9))

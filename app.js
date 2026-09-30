@@ -636,7 +636,7 @@ function TabFallas({ equipo, onUpdate }) {
   const [estado, setEstado] = useState("");
   const [ocupado, setOcupado] = useState(false);
   const [filtro, setFiltro] = useState("");
-  const [nueva, setNueva] = useState({ falla: "", solucion: "" });
+  const [nueva, setNueva] = useState({ codigo: "", falla: "", solucion: "" });
   const [foto, setFoto] = useState(null);
   const [abierta, setAbierta] = useState(null);
 
@@ -660,13 +660,13 @@ function TabFallas({ equipo, onUpdate }) {
   const agregar = async () => {
     if (!nueva.falla.trim()) return setEstado("Escribí la falla o el síntoma");
     setOcupado(true);
-    let f = { id: "f" + Date.now(), falla: nueva.falla.trim(), causas: "", solucion: nueva.solucion.trim(), origen: "propia", fecha: new Date().toISOString(), notas: [] };
+    let f = { id: "f" + Date.now(), codigo: nueva.codigo.trim(), falla: nueva.falla.trim(), causas: "", solucion: nueva.solucion.trim(), origen: "propia", fecha: new Date().toISOString(), notas: [] };
     if (foto) {
       setEstado("Subiendo foto…");
       f.foto = await procesarFoto(foto, `${equipo.nombre} - falla - ${f.falla.slice(0, 40)}`).catch(() => null);
     }
     onUpdate({ fallas: [f, ...fallas] });
-    setNueva({ falla: "", solucion: "" });
+    setNueva({ codigo: "", falla: "", solucion: "" });
     setFoto(null);
     setEstado("✓ Falla guardada");
     setOcupado(false);
@@ -675,13 +675,16 @@ function TabFallas({ equipo, onUpdate }) {
   const cambiar = (id, patch) => onUpdate({ fallas: fallas.map((f) => (f.id === id ? { ...f, ...patch } : f)) });
 
   const t = filtro.trim().toLowerCase();
-  const lista = t ? fallas.filter((f) => [f.falla, f.causas, f.solucion, ...(f.notas || []).map((n) => n.texto)].join(" ").toLowerCase().includes(t)) : fallas;
+  const lista = t ? fallas.filter((f) => [f.codigo, f.falla, f.causas, f.solucion, ...(f.notas || []).map((n) => n.texto)].join(" ").toLowerCase().includes(t)) : fallas;
 
   return (
     <div>
       <div className="panel-sub mt0">
         <div className="section-title"><h4>Registrar falla y reparación</h4></div>
-        <input className="field" placeholder="Falla / síntoma / código de error (ej: Err 12 NIBP)" value={nueva.falla} onChange={(e) => setNueva({ ...nueva, falla: e.target.value })} />
+        <div className="row gap">
+          <input className="field codigo-field" placeholder="Código (ej: Err 12)" value={nueva.codigo} onChange={(e) => setNueva({ ...nueva, codigo: e.target.value })} />
+          <input className="field grow" placeholder="Falla / síntoma" value={nueva.falla} onChange={(e) => setNueva({ ...nueva, falla: e.target.value })} />
+        </div>
         <textarea className="field" rows="3" placeholder="Cómo se reparó (opcional)" value={nueva.solucion} onChange={(e) => setNueva({ ...nueva, solucion: e.target.value })} />
         <div className="row gap wrap mt">
           <FotoInput label={foto ? "📷 Foto lista ✓" : "📷 Agregar foto"} onFoto={setFoto} disabled={ocupado} />
@@ -700,6 +703,7 @@ function TabFallas({ equipo, onUpdate }) {
         {lista.map((f) => (
           <div className="falla" key={f.id}>
             <button className="falla-head" onClick={() => setAbierta(abierta === f.id ? null : f.id)}>
+              {f.codigo && <span className="tag tag-codigo">{f.codigo}</span>}
               <span className="grow">{f.falla}</span>
               <span className={"tag " + (f.origen === "propia" ? "tag-ok" : "")}>{ORIGEN_FALLA[f.origen] || f.origen}{f.pagina ? " · pág. " + f.pagina : ""}{(f.ias || []).length ? " · " + nombresIA(f.ias) : ""}</span>
               {(f.notas || []).length > 0 && <span className="tag tag-ok">+{f.notas.length}</span>}
@@ -839,6 +843,106 @@ function TabArchivos({ equipo, onUpdate }) {
   );
 }
 
+const ESTADO_CODIGO = { sin_probar: "sin probar", no_funciono: "no funcionó", confirmado: "✓ funciona" };
+
+function TabAcceso({ equipo, onUpdate }) {
+  const codigos = equipo.codigosAcceso || [];
+  const [estado, setEstado] = useState("");
+  const [ocupado, setOcupado] = useState(false);
+  const [pasos, setPasos] = useState(equipo.accesoPasos || "");
+  const [editandoPasos, setEditandoPasos] = useState(!equipo.accesoPasos);
+
+  const base = (equipo.manuales || []).find((m) => (m.driveId || m.url) && m.tipo === "tecnico") || (equipo.manuales || []).find((m) => m.driveId || m.url);
+  const confirmado = codigos.find((c) => c.estado === "confirmado");
+  const resto = codigos.filter((c) => c.estado !== "confirmado");
+
+  const guardarPasos = () => {
+    onUpdate({ accesoPasos: pasos.trim() });
+    setEditandoPasos(false);
+  };
+
+  const buscar = async () => {
+    setOcupado(true);
+    setEstado(base ? "Leyendo el manual y buscando en foros…" : "Buscando en foros y la web…");
+    try {
+      const r = await api("codigos", { equipo: { nombre: equipo.nombre, marca: equipo.marca, modelo: equipo.modelo }, driveId: base && base.driveId, url: base && base.url, titulo: base && base.titulo });
+      const existentes = new Set(codigos.map((c) => c.codigo.toLowerCase().trim()));
+      const nuevos = r.codigos.filter((c) => !existentes.has(c.codigo.toLowerCase().trim())).map((c) => ({ ...c, id: "c" + Date.now() + Math.random().toString(36).slice(2, 6), estado: "sin_probar" }));
+      const patch = { codigosAcceso: [...codigos, ...nuevos] };
+      const pasosEncontrados = (r.pasos || []).map((p) => p.texto).filter(Boolean);
+      if (!equipo.accesoPasos && pasosEncontrados.length) {
+        patch.accesoPasos = pasosEncontrados[0];
+        setPasos(pasosEncontrados[0]);
+        setEditandoPasos(false);
+      }
+      onUpdate(patch);
+      setEstado(`✓ ${nuevos.length} códigos nuevos para probar` + (r.avisos.length ? " · " + r.avisos.join(" · ") : ""));
+    } catch (e) {
+      setEstado("✕ " + e.message);
+    }
+    setOcupado(false);
+  };
+
+  const marcar = (id, nuevoEstado) => {
+    // Solo un codigo confirmado por equipo: al confirmar uno, los demas quedan como estaban.
+    onUpdate({ codigosAcceso: codigos.map((c) => (c.id === id ? { ...c, estado: nuevoEstado } : c)) });
+  };
+  const borrar = (id) => onUpdate({ codigosAcceso: codigos.filter((c) => c.id !== id) });
+  const agregar = (codigo) => onUpdate({ codigosAcceso: [...codigos, { id: "c" + Date.now(), codigo, nota: "agregado a mano", origen: "manual", estado: "sin_probar" }] });
+
+  return (
+    <div>
+      <div className="panel-sub mt0">
+        <div className="section-title"><h4>Cómo entrar al modo de servicio</h4></div>
+        {editandoPasos ? (
+          <div>
+            <textarea className="field" rows="4" placeholder="Ej: Apagado, mantené ENCENDIDO + MENU 5 segundos → Setup → Service → ingresar código" value={pasos} onChange={(e) => setPasos(e.target.value)} />
+            <div className="row-end"><button className="btn primary small" onClick={guardarPasos}>Guardar</button></div>
+          </div>
+        ) : (
+          <div className="row gap wrap" style={{ alignItems: "flex-start" }}>
+            <p className="pre grow" style={{ margin: 0 }}>{equipo.accesoPasos}</p>
+            <button className="btn small" onClick={() => setEditandoPasos(true)}>Editar</button>
+          </div>
+        )}
+      </div>
+
+      {confirmado && (
+        <div className="codigo-confirmado mt">
+          🔑 Código confirmado: <b>{confirmado.codigo}</b>
+          {confirmado.nota && <span className="muted"> — {confirmado.nota}</span>}
+        </div>
+      )}
+
+      <div className="row gap wrap mt">
+        <button className="btn" onClick={buscar} disabled={ocupado}>{codigos.length ? "Buscar más códigos" : "Buscar códigos comunes"}</button>
+      </div>
+      {estado && <div className="small estado">{ocupado && <span className="spinner" />} {estado}</div>}
+
+      <div className="panel-sub">
+        <div className="section-title"><h4>Códigos para probar</h4></div>
+        {codigos.length === 0 && !ocupado && <p className="muted">Sin códigos cargados. Buscalos o agregalos a mano.</p>}
+        {resto.map((c) => (
+          <div className="item-row" key={c.id}>
+            <span>
+              <b>{c.codigo}</b>
+              {c.nota && <span className="small muted"> — {c.nota}</span>}
+              {(c.ias || []).length > 0 && <span className="small muted"> · {nombresIA(c.ias)}</span>}
+            </span>
+            <span className="row gap">
+              <span className={"tag" + (c.estado === "no_funciono" ? " tag-no" : "")}>{ESTADO_CODIGO[c.estado] || "sin probar"}</span>
+              {c.estado !== "confirmado" && <button className="btn small" onClick={() => marcar(c.id, "confirmado")}>✓ Funcionó</button>}
+              {c.estado !== "no_funciono" && <button className="btn small" onClick={() => marcar(c.id, "no_funciono")}>No anduvo</button>}
+              <button className="icon-btn" title="Quitar" onClick={() => borrar(c.id)}>×</button>
+            </span>
+          </div>
+        ))}
+        <InlineAdd placeholder="Agregar código a mano…" onAdd={agregar} />
+      </div>
+    </div>
+  );
+}
+
 function TabConsulta({ equipo, iasActivas = [], onUpdate }) {
   const enDrive = (equipo.manuales || []).filter((m) => m.driveId || m.url).length;
   const [mensajes, setMensajes] = useState([
@@ -878,6 +982,8 @@ function TabConsulta({ equipo, iasActivas = [], onUpdate }) {
             ...(equipo.archivos || []).filter((a) => a.driveId && a.mime === "application/pdf").map((a) => ({ tipo: "otro", titulo: a.descripcion || a.nombre, driveId: a.driveId, driveLink: a.driveLink })),
           ],
           fallas: (equipo.fallas || []).map((f) => ({ falla: f.falla, solucion: f.solucion, origen: f.origen, notas: (f.notas || []).filter((n) => n.texto !== "Foto").map((n) => ({ texto: n.texto })) })),
+          accesoPasos: equipo.accesoPasos || "",
+          codigosAcceso: (equipo.codigosAcceso || []).map((c) => ({ codigo: c.codigo, estado: c.estado })),
         },
         pregunta,
         historial: historial.map((m) => ({ rol: m.rol, texto: m.texto })),
@@ -947,6 +1053,7 @@ function FichaEquipo({ equipo, todosLosEquipos, onVolver, onUpdate, onBorrar, ia
   const tabs = [
     { id: "consulta", label: "Consulta" },
     { id: "fallas", label: `Fallas (${(equipo.fallas || []).length})` },
+    { id: "acceso", label: `Acceso${(equipo.codigosAcceso || []).some((c) => c.estado === "confirmado") ? " 🔑" : ""}` },
     { id: "manuales", label: `Manuales (${(equipo.manuales || []).length})` },
     { id: "videos", label: `Videos (${(equipo.videos || []).length})` },
     { id: "archivos", label: `Fotos y archivos (${(equipo.archivos || []).length})` },
@@ -971,6 +1078,7 @@ function FichaEquipo({ equipo, todosLosEquipos, onVolver, onUpdate, onBorrar, ia
       </div>
       {tab === "consulta" && <TabConsulta key={equipo.id} equipo={equipo} iasActivas={iasActivas} onUpdate={onUpdate} />}
       {tab === "fallas" && <TabFallas equipo={equipo} onUpdate={onUpdate} />}
+      {tab === "acceso" && <TabAcceso equipo={equipo} onUpdate={onUpdate} />}
       {tab === "archivos" && <TabArchivos equipo={equipo} onUpdate={onUpdate} />}
       {tab === "manuales" && <TabManuales equipo={equipo} onUpdate={onUpdate} />}
       {tab === "videos" && <TabVideos equipo={equipo} onUpdate={onUpdate} />}
@@ -1307,7 +1415,8 @@ function App() {
         ...(e.manuales || []).map((m) => m.titulo),
         ...(e.insumos || []).map((i) => i.nombre + " " + (i.codigo || "")),
         ...(e.repuestos || []).map((r) => r.nombre + " " + (r.codigo || "")),
-        ...(e.fallas || []).map((f) => f.falla),
+        ...(e.fallas || []).map((f) => f.codigo + " " + f.falla),
+        ...(e.codigosAcceso || []).map((c) => c.codigo),
       ]
         .filter(Boolean)
         .join(" ")
@@ -1376,6 +1485,7 @@ function App() {
                     <div className="badge-row">
                       <span className={`badge ${enD ? "ok" : "warn"}`}>{enD} manuales</span>
                       <span className="badge">{(e.fallas || []).length} fallas</span>
+                      {(e.codigosAcceso || []).some((c) => c.estado === "confirmado") && <span className="badge ok">🔑 código</span>}
                       <span className="badge">{(e.videos || []).length} videos</span>
                       <span className="badge">{(e.insumos || []).length} insumos</span>
                       <span className="badge">{(e.repuestos || []).length} repuestos</span>

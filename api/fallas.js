@@ -3,12 +3,13 @@
 // problemas / codigos de error) y de la web (foros, videos, service notes).
 const { handler, send, fail, gemini, preguntarTodas, parseJson, geminiUriForManual } = require("./_lib");
 
-const FORMATO = `Respondé solo JSON: {"fallas":[{"falla":"sintoma o mensaje de error","causas":"causas probables","solucion":"pasos de reparacion concretos","pagina":0}]}. Entre 5 y 15 fallas, las mas frecuentes primero, en español.`;
+const FORMATO = `Respondé solo JSON: {"fallas":[{"codigo":"codigo de error que muestra el equipo en pantalla, si tiene (ej: Err 12, E-04, Alarm 3); dejar \"\" si no hay codigo","falla":"sintoma o mensaje de error","causas":"causas probables","solucion":"pasos de reparacion concretos","pagina":0}]}. Entre 5 y 15 fallas, las mas frecuentes primero, en español.`
 
 function limpiar(d, fuente) {
   return ((d && d.fallas) || [])
     .filter((f) => f && f.falla)
     .map((f) => ({
+      codigo: f.codigo ? String(f.codigo) : "",
       falla: String(f.falla),
       causas: f.causas ? String(f.causas) : "",
       solucion: f.solucion ? String(f.solucion) : "",
